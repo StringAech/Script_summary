@@ -72,3 +72,4 @@ ggplot(df_pcs,aes(x=PC1,y=PC2,color=Species )) +
   labs(title="Iris PCA Clustering", 
        subtitle=" PC1 and PC2 principal components ",    
        caption="Source: Iris") + theme_classic()
+#20220728更新
