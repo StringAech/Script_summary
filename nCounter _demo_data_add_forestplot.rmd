@@ -1,0 +1,1947 @@
+---
+#title: "add forestplot function"
+#author: "guohao",增加了森林图模块
+#date: "2022/8/11"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 4
+    number_sections: true
+    theme: paper
+    smooth_scroll: false
+    keep_md: false
+    highlight: tango
+    self_contained: true
+    dev: "png"
+    df_print: paged
+  word_document:
+    toc: true
+  pdf_document:
+    toc: true
+params:
+  json_path: "./raw_data/list_param.json"
+  extdata_path: "./resource/extdata/"
+  resource_path: "./resource/"
+bibliography: resource/ref.bib
+csl: resource/ieee.csl
+link-citations: true
+---
+```{r pre_setup, results = 'hide', echo = FALSE, warning = FALSE, message = FALSE}
+
+# !!! 请注意，若在Rstudio交互界面进行手动分析的话，请运行下方命令设置工作目录
+#setwd((dirname(rstudioapi::getActiveDocumentContext()$path)))
+
+# JSON path setup, which will be loaded as list_param
+json_path <- params$json_path
+# Resource_info_Path setup, which will be extdata folder
+Resource_info_Path <- params$extdata_path
+# resource_path
+resource_path <- params$resource_path
+
+# function to add a trailing "/" if not available in directory input
+ensure_trailing_slash <- function(string){
+	if(!endsWith(string, "/")){ string <- paste0(string, "/")}
+	return(string)
+}
+
+# source the environment, using .libPath()
+source(paste0(ensure_trailing_slash(resource_path), ".Rprofile"))
+
+# readin json file to list_param
+suppressPackageStartupMessages(library(jsonlite))
+list_param <- jsonlite::read_json(path = json_path, simplifyVector = T)
+
+# need to be modified with project anno info
+qc_groups <- list_param$qc_groups
+
+# need to be modified with project anno info
+heatmap_groups <- list_param$heatmap_groups
+
+# need to be modified with project anno info
+deg_groups <- list_param$deg_groups
+
+# shown on the front page, need to be modified with client name
+Title_Client_Name <- list_param$title_client_name
+
+# 报告对应公司主体
+Title_Belonged_Company <- list_param$title_belonged_company
+
+# shown on the front page, need to be modified with a report registration number
+Title_Report_Number <- paste0(format(Sys.time(), '%Y%m%d'), ":", stringr::str_pad(floor(runif(1) * 10000), 4, pad = "0"))
+
+# Differential expression section parameters
+fdr_cutoff <- 0.05
+lfc_cutoff <- 1
+volcano_num_label_each <- 10
+
+# if heatmap needed to be scaled, default is TRUE
+heatmap_scale <- TRUE
+
+# 是否保存rds数据
+save_rds_TF <- TRUE
+
+# 实验操作人
+sig_operator <- list_param$operator
+# 数据分析人
+sig_analyst <- list_param$analyst
+# 报告核对人
+sig_reviewer <- list_param$reviewer
+# 报告审批人
+sig_approver <- list_param$approver
+# 落款日期
+sig_date <- list_param$sig_date
+
+```
+
+```{r package-setup, results = 'hide', echo = FALSE, warning = FALSE, message = FALSE}
+suppressPackageStartupMessages(library(EPARS))
+suppressPackageStartupMessages(library(ComplexHeatmap))
+suppressPackageStartupMessages(library(openxlsx))
+suppressPackageStartupMessages(library(RColorBrewer))
+suppressPackageStartupMessages(library(corrplot))
+suppressPackageStartupMessages(library(data.table))
+suppressPackageStartupMessages(library(ggpubr))
+suppressPackageStartupMessages(library(limma))
+suppressPackageStartupMessages(library(dplyr))
+suppressPackageStartupMessages(library(pryr))
+suppressPackageStartupMessages(library(tidyHeatmap))
+suppressPackageStartupMessages(library(circlize))
+suppressPackageStartupMessages(library(kableExtra))
+suppressPackageStartupMessages(library(DT))
+suppressPackageStartupMessages(library(clusterProfiler))
+suppressPackageStartupMessages(library(Hmisc))
+suppressPackageStartupMessages(library(base64enc))
+suppressPackageStartupMessages(library(R.utils))
+suppressPackageStartupMessages(library(stringr))
+suppressPackageStartupMessages(library(ggrepel))
+
+```
+
+```{r global-setup, include = FALSE}
+Suffix <- "nCounter"
+CachePath <- paste0("./results/rendering_cache_", Suffix, "/")
+PlotsPath <- paste0("./results/rendering_plots_", Suffix, "/")
+create_dir(path.list = c(CachePath,PlotsPath))
+
+space <- " 
+
+"
+options(knitr.kable.NA = '')
+`%!in%` <- Negate(`%in%`)
+
+project_info_tbl <- read.xlsx(list_param$param_path, sheet = "project_info", colNames = FALSE)
+
+# define the company subject of the report
+if (!exists("Title_Belonged_Company")){
+	Title_Belonged_Company <- format_company_title(project_info_tbl$X2)
+}
+company_detail_list <- define_company_info(Title_Belonged_Company)
+vi_company_short <- company_detail_list[[1]]
+vi_company_long <- company_detail_list[[2]]
+vi_logo <- company_detail_list[[3]]
+vi_report_back <- company_detail_list[[4]]
+vi_back <- 	company_detail_list[[5]]
+
+knitr::opts_chunk$set(
+	cache = FALSE,
+	cache.lazy = FALSE,
+	cache.comments = FALSE,
+	warning = FALSE,
+	message = FALSE,
+	echo = FALSE,
+	fig.align = "center",
+	# fig.keep = "none",
+	fig.keep = "all",
+	# dpi = 512,
+	cache.path = CachePath,
+	fig.path = PlotsPath,
+	dev = "png",
+	collapse = TRUE)
+```
+
+
+```{r data-readin, results = 'hide'}
+
+anno_data_path <- list_param$anno_data_path
+raw_data_path <- list_param$raw_data_path
+directory_data_path <- list_param$directory_data_path
+
+# readin normalized expression matrix csv from nSolver default output folder
+linear_norm_mtx <- read_nCounter_norm(directory_data_path)[["linear_norm_mtx"]]
+log2_norm_mtx <- read_nCounter_norm(directory_data_path)[["log2_norm_mtx"]]
+
+# readin anno dataframe csv from input path
+filtered_anno <- read_nCounter_anno(anno_data_path)[["filtered_anno"]]
+unfiltered_anno <- read_nCounter_anno(anno_data_path)[["unfiltered_anno"]]
+# readin assay_anno from raw csv input path
+assay_anno <- read_nCounter_raw(raw_data_path = raw_data_path, 
+								anno_df = unfiltered_anno, 
+								exp_mtx = linear_norm_mtx)[["assay_anno"]]
+# readin raw_mtx from raw csv input path
+raw_mtx <- read_nCounter_raw(raw_data_path = raw_data_path, 
+							 anno_df = unfiltered_anno, 
+							 exp_mtx = linear_norm_mtx)[["raw_mtx"]]
+
+
+data <- new("nCounter_data", exp = linear_norm_mtx, unfiltered_exp = raw_mtx, 
+			anno = filtered_anno, assay_anno = assay_anno, 
+			unfiltered_anno = unfiltered_anno, log_exp = log2_norm_mtx)
+
+## 手动配置分析相关参数（后续需统一放到配置文件中）
+data@heatmap_groups <- heatmap_groups
+data@config$group_stat <- checkGroupStatus(data@heatmap_groups)
+data@config$data_type <- "nCounter"
+data@config$heatmap_scale <- TRUE
+data@qc_groups <- qc_groups
+data@deg_groups <- deg_groups
+data@config$boxplot_ncol <- 6
+data@config$heatmap_color <-
+	colorRamp2(c(-2, 0, 2), colors = c("royalblue3", "grey97", "indianred3"))
+# colors = c("#CCFFFF", "#000000", "#CC9900")
+data@config$cor_color <- colorRampPalette(c("indianred3", "grey97", "royalblue3"))
+data@config$pan_color <-  desat(c("royalblue3", "indianred3",
+								brewer.pal(name="Dark2", n = 8),
+								brewer.pal(name="Accent", n = 8),
+								brewer.pal(name="Set2", n = 8),
+								brewer.pal(name="Pastel1", n = 8),
+								brewer.pal(name="Pastel2", n = 8)),0.8)
+if(!exists("volcano_num_label_each") == T) 
+	{data@config$deg$volcano_num_label_each <- 10} else 
+	{data@config$deg$volcano_num_label_each <- volcano_num_label_each}
+if(!exists("fdr_cutoff") == T) {data@config$deg$fdr_cutoff <- 0.05} else
+	{data@config$deg$fdr_cutoff <- fdr_cutoff}
+if(!exists("lfc_cutoff") == T) {data@config$deg$lfc_cutoff <- 1} else 
+	{data@config$deg$lfc_cutoff <- lfc_cutoff}
+
+## temp
+data <- epars_plot_setting(data)
+data <- epars_heatmap_anno_data(data)
+
+# 读取项目信息中的每个分析步骤的详细描述信息
+dscrp_tbl <- read.xlsx(list_param$param_path, sheet = "description")
+dscrp_list <- dscrp_tbl[,2]
+names(dscrp_list) <- dscrp_tbl[,1]
+
+```
+
+<style>
+.tocify .tocify-header .active {background: #4E84CC;}
+.list-group-item:hover {background: #89B9FF;}
+#TOC::before {
+  content: "目 录";
+  display: block;
+  font-size: 1.5rem;
+  text-align: center;
+  color: #4E84CC!important;
+  padding-top: 2px;
+  padding-bottom: 5px;
+  font-weight: bold;
+}
+
+.epars-tbl {
+  border-collapse: collapse;
+  width: 100%;
+  text-align: right;
+}
+.epars-tbl td, th {
+  border-bottom: 1px solid #F5F5F5;
+  padding: 10px;
+}
+.epars-tbl td:first-child, th:first-child {padding-left:16px;}
+.epars-tbl tr:nth-child(even){background-color: #F5F5F5;}
+.epars-tbl th {
+  background-color: #4E84CC!important;
+  color: white!important;
+}
+.epars-tbl tr:hover {background-color: #E6E6E6;}
+
+h1 { /* Header 1 */
+  background-image:url("data:image/png;base64,`r base64enc::base64encode(paste0(resource_path, vi_logo)) `"); padding-top: 1px !important; background-position:right top; background-size: 246px 47px;
+  background-repeat: no-repeat; color: #4E84CC;}
+
+h1:after {content:' '; display: block; border-bottom:3px solid #4E84CC;
+	border-radius:4px; padding-top:5px !important;
+    -webkit-border-radius:4px; -moz-border-radius:4px;
+    box-shadow:inset 0 1px 1px rgba(0, 0, 0, .05);
+    -webkit-box-shadow:inset 0 1px 1px rgba(0, 0, 0, .05);
+    -moz-box-shadow:inset 0 1px 1px rgba(0, 0, 0, .05);}
+.container {position:relative; width:100%; margin:0px; padding:0px;}
+.cover_img {width:auto; height:auto;}
+.cover_company_info {position:absolute; bottom:2%; left:1%; font-size:10px; color:#C8C8C8;
+					writing-mode: vertical-rl;}
+.cover_company_title {position:absolute; top:35%; left:5%; font-size:45px; color:#4E84CC;}
+.cover_report_title {position:absolute; top:40%; left:5%; font-size:45px; color:#969696;}
+.cover_project_title {position:absolute; top:46%; left:5%; font-size:30px; color:#4E84CC;}
+.cover_project_number {position:absolute; bottom:3.5%; right:3%; font-size:15px; color:#4E84CC;}
+.cover_project_date {position:absolute; bottom:1.5%; right:3%; font-size:15px; color:#969696;}
+.back_info {position:absolute; top:65%; left:30%;
+			 font-size:15px; color:#4E84CC;}
+body{font-size: 14px;}
+summary {
+	text-decoration: underline; 
+	/* font-weight: bold; */
+	color:#4E84CC;
+	}
+summary:hover {color: #003C7B;}
+.details_text { 
+  box-shadow: 1px 1px 1px grey;
+  margin: 5px;
+  border-left: 8px solid #4E84CC;
+  border-radius: 2px;
+  background-color: #EBEBEB!important;
+  width: 100%;
+  padding: 10px;
+}
+.details_text span {background-color: #EBEBEB!important;}
+dsrcp {font-weight: bold;}
+.disclaimer {
+	border: 3px solid #4E84CC;
+	background-color: #F5F5F5!important;
+	width: 99%;
+    font-weight: bold;
+    font-size: 15px;
+    font-family: SimHei;
+    line-height: 30px;
+    padding: 30px;
+}
+.signature {
+	text-align: right;
+    line-height: 25px;
+    font-weight: bold;
+    font-size: 15px;
+    font-family: SimHei;
+}
+
+.fig_caption {
+  text-align: center;
+  font-size: .8rem;
+  color: light-grey;
+}
+span.highlight {
+  font-weight: bold;
+  color: #4E84CC;
+  font-size: 105%;
+  display:inline-block;
+}
+</style>
+
+<div class="container">
+  <img class="cover_img" src= "resource/NGS_report_cover.png">
+  <div class="cover_company_info">`r vi_company_long`</div>
+  <div class="cover_company_title">`r vi_company_short`</div>
+  <div class="cover_report_title">nCounter表达谱分析报告</div>
+  <div class="cover_project_title">`r Title_Client_Name`</div>
+  <div class="cover_project_number">报告编号 | **`r Title_Report_Number`**</div>
+  <div class="cover_project_date">`r format(Sys.time(), '%B %d, %Y')`</div>
+</div>
+
+<br>
+
+# 报告基础信息
+
+## 项目信息
+
+本项目相关信息请参见下方表格。
+```{r project-info, results = 'asis'}
+
+tbl <- read.xlsx(list_param$param_path, sheet = "project_info")
+  print(kable(tbl, format = 'html', row.names = F,  table.attr = "class=\"epars-tbl\""))
+  cat("<br>")
+```
+
+## 样本信息
+
+本项目包含的样本相关信息请参见下方表格。
+```{r sample-info, results = 'asis'}
+
+tbl <- read.xlsx(list_param$param_path, sheet = "sample_info")
+  print(kable(tbl, format = 'html', row.names = F,  table.attr = "class=\"epars-tbl\""))
+  cat("<br>")
+```
+
+## 主要简写与名词解释
+
+本报告中出现的专有名词缩写对应的意义和中文翻译请参见下方表格。
+```{r abbreviation, results = 'asis'}
+tbl <- read.xlsx(paste0(Resource_info_Path, "Permanent_Information/permanent_info.xlsx"), sheet = "nCounter_abbreviation")
+  print(kable(tbl, format = 'html', row.names = F,  table.attr = "class=\"epars-tbl\"") %>% scroll_box(height = "450px"))
+  cat("<br>")
+```
+
+# 实验信息
+
+nCounter®平台通过应用NanoString的荧光分子条形码，仅需冷冻组织约25-50 ng RNA或FFPE约150~300 ng RNA即可对超过八百种特异的mRNA转录本进行准确的定量；整个流程中不需要反转录和PCR，省去了酶促和扩增可能引入偏差的过程，但其检测的灵敏度和准确性媲美实时荧光定量PCR。nCounter的检测系统包括独立的样品纯化工作站和数据信号采集仪；流程包括杂交、纯化固定、计数三个步骤。该技术的实验方法简单易操作，单次反应只需15分钟人工操作，可直接测定新鲜组织和FFPE样品中的RNA提取物。
+
+## 技术原理
+
+以下用多张插图来展示nCounter的工作原理：
+
+1) 所有的捕获探针和报告探针都各连有一段Common Sequence。
+<center>![](`r paste0(Resource_info_Path, "Lab_Graph/nCounter_lab_workflow_1.png") `){width=50%}</center>
+<br>
+2) 在Prep Station中有两种带有不同Oligo的Magnetic beads，经过不同步骤的洗脱处理，可以纯化三重复合物。
+<center>![](`r paste0(Resource_info_Path, "Lab_Graph/nCounter_lab_workflow_2.png") `){width=45%}</center>
+<br>
+3) 纯化好的三重复合物，可在其捕获探针带有的Biotin的帮助下与Cartridge表面的Streptavidin结合，并被锚定在Cartridge上。
+<center>![](`r paste0(Resource_info_Path, "Lab_Graph/nCounter_lab_workflow_3.png") `){width=60%}</center>
+<br>
+4) 经过电极处理后，三重复合物将按照同样的方向稳定的“卧倒”在Cartridge中等待进行信号采集。
+<center>![](`r paste0(Resource_info_Path, "Lab_Graph/nCounter_lab_workflow_4.png") `){width=40%}</center>
+<br>
+5) 上述步骤中的Cartridge将被放入Digital Analyzer中，通过显微装置和CCD相机采集荧光条形码信号，并转化为一一对应的靶标mRNA分子计数。
+<br>
+<center>![](`r paste0(Resource_info_Path, "Lab_Graph/nCounter_lab_workflow_5.png") `){width=50%}</center>
+<br>
+
+
+## 实验流程
+
+下方展示的是 NanoString® 官方 nCounter® Gene Expression Panels 的产品实验流程示意图：
+
+<center>![](`r paste0(Resource_info_Path, "Lab_Graph/nCounter_Lab_Workflow.png") `){width=95%}</center>
+<div class="fig_caption">*图片来自 NanoString’s Prosigna Breast Cancer Assay, by Nathan Selvage*</div>
+<br><br>
+
+
+本项目的实际实验流程在下方的流程图中展示。
+
+<center>![](`r paste0(Resource_info_Path, "Flowchart/nCounter_lab.png") `){width=95%}</center>
+<div class="fig_caption">*项目实验设计存在临时变动的可能，若有出入以项目实际情况为准。*</div>
+<br>
+
+## 仪器和试剂信息
+
+<details>
+<summary>本项目使用到的关键仪器和试剂的相关信息请点击下拉列表</summary>
+```{r instrument-reagent, results = 'asis'}
+tb_instrument <- read.xlsx(paste0(Resource_info_Path, "Permanent_Information/permanent_info.xlsx"), sheet = "nCounter_instrument")
+  cat("<br>")
+  print(kable(tb_instrument, format = 'html', row.names = F, table.attr = "class=\'epars-tbl\'"))
+
+cat("<br>")
+  
+tb_reagent <- read.xlsx(paste0(Resource_info_Path, "Permanent_Information/permanent_info.xlsx"), sheet = "nCounter_reagent")
+  print(kable(tb_reagent, format = 'html', row.names = F, table.attr = "class=\'epars-tbl\'"))
+  cat("<br>")  
+  
+```
+</details>
+<br>
+
+## 样本质控
+
+### 病理质控
+
+在实验流程中，通过HE染色的方法对于临床已确认为肿瘤的样本进行病理质控。下方表格展示的是对于肿瘤样本的肿瘤细胞占比设置的质控阈值。
+
+```{r HE-QC, results = 'asis'}
+tb_QC_HE <- read.xlsx(paste0(Resource_info_Path, "Permanent_Information/permanent_info.xlsx"), sheet = "nCounter_QC_HE")
+  print(kable(tb_QC_HE, format = 'html', row.names = F, table.attr = "class=\'epars-tbl\'"))
+cat("<br>")
+```
+<details>
+<summary>病理质控详情</summary>
+<br>1) 肿瘤细胞占比是指：肿瘤细胞占整个切片总细胞的百分比。此结果原则上不能代替医学病理科的病理诊断，病理质控需临床提供相关的肿瘤信息，如原始病理报告或经确诊的肿瘤类型。如果不能提供肿瘤信息，则会出现部分病例无法评估肿瘤细胞占比的情况。
+<br>2) 病理质控不合格的样本，直接反馈给销售，由销售判断对此患者的处理方式：重新送样、更改订单或停止检测，如停止检测，销售可以申请退费，原则上所退费用为收费的100%；
+<br>3) 病理质控结果为风险检测，经销售与客户沟通，提前告知风险，得到客户确认后可以进入后续检测的环节，由客户自行承担检测结果。
+</details>
+<br>
+
+### RNA质控
+
+对于样本提取的RNA会针对不同技术参数进行质控。下方表格展示的是设定的质控标准和最低检测标准。
+
+```{r RNA-QC, results = 'asis'}
+tb_QC_RNA <- read.xlsx(paste0(Resource_info_Path, "Permanent_Information/permanent_info.xlsx"), sheet = "nCounter_QC_RNA")
+  print(kable(tb_QC_RNA, format = 'html', row.names = F, table.attr = "class=\'epars-tbl\'"))
+cat("<br>")
+```
+<details>
+<summary>RNA提取质控详情</summary>
+<br>若由实验室进行RNA提取且质控结果不合格，会根据样本情况选择性反馈：
+<br>1) 样本有剩余，实验室内部会重新提取，同时给销售反馈会在原有交付时间的基础上延长，给出最后的交付数据时间；
+<br>2) 样本无剩余，由实验室告知销售及项目管理，此患者样本检测过程失败，由销售根据与客户沟通的情况，决定是否重新送样、更改项目或停止检测，若停止检测，销售可以申请退费，原则上所退费用为收费的80%，应扣除收样到提取所产生的费用，销售价的20%。
+</details>
+<br>
+
+# 数据质控
+
+数据下机后，将会从五个不同方面的质量参数来对数据的质量表现进行评估，下方的流程图展示了nCounter平台数据质量控制(QC)的步骤。
+<center>![](`r paste0(Resource_info_Path, "Flowchart/nCounter_QC.png") `){width=40%}</center>
+
+```{r qc-dir, results = 'hide'}
+CachePath <- sub('[/][^/]+$', '/1.Quality_Control/', gsub('[/]$', '', CachePath))
+PlotsPath <- sub('[/][^/]+$', '/1.Quality_Control/', gsub('[/]$', '', PlotsPath))
+create_dir(path.list = c(CachePath,PlotsPath))
+```
+QC相关的数据图表将被保存至 **`r CachePath`**。
+<br>
+
+## 管家基因
+
+<details>
+<summary>管家基因介绍</summary>
+<div class=details_text>
+管家基因 HouseKeeping(HK) Genes 是指某一类基因的集合。这类基因在所有细胞中均有表达，是细胞维持基本生命活动所需的相对保守的基因。因为管家基因的表达持续并且受环境因素影响较少，所以细胞管家基因表达的几何平均数可以用作该细胞表达信号强度的参考。
+</details>
+<details>
+<summary>几何平均数介绍</summary>
+<div class=details_text>
+几何平均数(Geometric Mean, Geomean)作为一种均值表现方法，在分析过程中常被使用。它使用所有样本值的乘积来指示一组数字中的集中趋势或典型值。对于一组数字$x_{1},x_{2}, \dots, x_{n}$，它们的几何平均数的定义为:$$(\prod_{i=1}^{n} x_i)^{\frac{1}{n}} = \sqrt[n]{x_1x_2 \dots x_n}$$
+<br>
+</details>
+本项目中针对每一个样本，计算了所有管家基因表达的几何平均数，计算结果分布情况请参见下图。横轴代表每个样本，纵轴代表管家基因表达几何平均数，图例代表此步骤的阈值筛选信息。
+<br>管家基因信号较低往往意味着样品的投入量较低，或是实验反应效率较低。理想情况下所有样本管家基因计数的几何平均数将大于<span class="highlight">100</span>，若低于此阈值则需要深入分析管家基因表达较低的原因，谨慎使用对应样本的表达数据；除了理想情况阈值外，分析所需最小几何平均数阈值为<span class="highlight">32</span>。若低于<span class="highlight">32</span>，则需考虑滤除该样本保证数据分析准确性。
+
+```{r HK-QC, results = 'asis', fig.width = 9, fig.height = 7}
+
+HK_list <- rownames(data@assay_anno[data@assay_anno$`Class Name` == "Housekeeping", ])
+HK_df <- data@unfiltered_exp[rownames(data@unfiltered_exp) %in% HK_list, ]
+HK_df_plotting <- rbind(HK_df, "geo_mean" = NA)
+
+for (per_column in colnames(HK_df)){
+	HK_df_plotting["geo_mean", per_column] <- geo_mean(HK_df[, per_column])
+}
+
+sample_info_df <- data@unfiltered_anno
+sample_info_df$HK.Geo.Mean <- HK_df_plotting["geo_mean",]
+sample_info_df$HK.Flag <- ifelse(sample_info_df$HK.Geo.Mean < 32, 'Fail', 
+					ifelse(sample_info_df$HK.Geo.Mean < 100, 'Borderline', 'Pass'))
+data@unfiltered_anno <- sample_info_df
+
+p <- ggplot(sample_info_df, aes(x = reorder(Sample.Name, HK.Geo.Mean), y = HK.Geo.Mean,
+			color=HK.Flag)) + geom_point(size = 3, alpha = 0.8) + theme_bw() +
+	 xlab("Sample Names") + ylab("Geometric Mean of HK Genes") +
+	 # scale_y_log10(breaks = c(100, 500, 1000, 5000),
+     #              labels = c(100, 500, 1000, 5000)) +
+     theme(axis.text.x = element_text(angle = 90, hjust = 1, face = "bold",
+     	  # colour = ifelse(sample_info_df$QC.Flag == "YES", "indianred3", "black")
+     	  )) +
+	 scale_color_manual("HK Flag", values = c('Fail' = desat('indianred3'),
+	 										  'Borderline' = desat("tan3"),
+	 										  'Pass' = desat('royalblue3'))) +
+	 geom_hline(aes(yintercept = 100, linetype = "Borderline Threshold"),
+                 size = 1, color = "grey") +
+	 geom_text(aes(0, 100, label = "100", vjust = -1, hjust = -0.5), 
+	 			color = "grey") +
+	 geom_hline(aes(yintercept = 32, linetype = "Minimum Threshold"),
+                 size = 1, color = desat("indianred3")) +
+	 geom_text(aes(0, 32, label = "32", vjust = -1, hjust = -0.5), 
+	 		  color = desat("indianred3")) +
+	 scale_linetype_manual(name = "Cutoffs", values = c(2, 2), 
+                      guide = guide_legend(override.aes = list(color = c("grey",
+                      									desat("indianred3"))))) +
+	 annotate("rect", xmin = 0, xmax = Inf, ymin = 32,
+               ymax = 100, fill = desat("grey"), alpha = 0.1) +
+	 annotate("rect", xmin = 0, xmax = Inf, ymin = -Inf,
+               ymax = 32, fill = desat("indianred3"), alpha = 0.1)
+
+subchunkify(p, fig_width = 9, fig_height = 7)
+ggsave(paste0(PlotsPath, "QC_Housekeeping_genes_GeoMean.pdf"),
+	   plot = p, width = 9, height = 7)
+
+```
+<br>
+
+## 捕获视场
+
+<details>
+<summary>视场介绍</summary>
+<div class=details_text>
+视场 - Field of View (FOV)指某一个时刻下视觉接收方可感知的图像大小。nCounter平台通过Digital Analyzer 识别样本所在区域的荧光条形码而实现数字定量，每一次成像可被视为一个FOV。每个FOV会进行质量检查，偶发的光学成像问题导致聚焦不成功会使得对应FOV无法用于后续计数。过滤后仅会保留高质量的FOV，称为<span class="highlight">FOV Counted</span>。
+</details>
+下方对不同样本合格的视场(FOV)占比的分布进行了呈现。横轴代表每个样本上机时Lane编号，纵轴代表合格FOV占所有采集FOV的比例，图中每一个点代表一个样本。在每个FOV质量检查之后，对于样本整体需要进行FOV质控，本项目FOV质控的阈值设定为<span class="highlight">75%</span>。即，若一个样本合格的FOV占比未达到<span class="highlight">75%</span>时，该样本对应的实验步骤中成像效率本身可能存在问题，对应产出的数据被认为不够可靠。FOV质控的详情可参考[此处](https://nanostring.com/wp-content/uploads/Gene_Expression_Data_Analysis_Guidelines.pdf)。本质控呈现的图中，灰色线段代表FOV质控的阈值，样本点的着色代表了样本是否通过FOV质控，蓝色为通过质控，红色则为未达到质控阈值标准。
+
+```{r FOV-QC, results = 'asis', fig.width = 9, fig.height = 7}
+
+sample_info_df <- data@unfiltered_anno
+# sample_info_df$Lane.Number <- as.character(sample_info_df$Lane.Number)
+# sample_info_df$FOV.percent <- sample_info_df$FOV.Counted / sample_info_df$FOV.Count
+# sample_info_df$FOV.flag <- ifelse(sample_info_df$FOV.percent < 0.75, 'Failed', 'Passing')
+# data@unfiltered_anno <- sample_info_df
+sample_info_df$Lane.Number <- as.character(sample_info_df$Lane.Number)
+
+p <- ggplot(sample_info_df, aes(x = Lane.Number, y = Imaging.QC,
+			color=Imaging.QC.Flag)) + geom_point(size = 3, alpha = 0.8) + theme_bw() +
+	 xlab("Sample Loaded Lane Label") + ylab("FOV Counted Percentage") +
+	 # scale_y_log10(breaks = c(100, 500, 1000, 5000),
+     #              labels = c(100, 500, 1000, 5000)) +
+     theme(axis.text.x = element_text(hjust = 1, face = "bold",
+     	  # colour = ifelse(sample_info_df$QC.Flag == "YES", "indianred3", "black")
+     	  )) + ylim(0,1) +
+	 scale_color_manual("FOV Flag", values = c('YES' = desat('indianred3'),
+	 										  'NO' = desat('royalblue3'))) +
+	 geom_hline(aes(yintercept = 0.75, linetype = "FOV Counted Threshold"),
+                 size = 1, color = "grey") +
+	 geom_text(aes(0, 0.75, label = "75%", vjust = -1, hjust = -0.5), 
+	 			color = "grey") +
+	 scale_linetype_manual(name = "Cutoffs", values = c(2, 2), 
+                      guide = guide_legend(override.aes = list(color = "grey"))) +
+	 annotate("rect", xmin = -Inf, xmax = Inf, ymin = -Inf,
+               ymax = 0.75, fill = desat("grey"), alpha = 0.3)
+
+subchunkify(p, fig_width = 9, fig_height = 7)
+ggsave(paste0(PlotsPath, "QC_FOV_Counted_Percentage.pdf"),
+	   plot = p, width = 9, height = 7)
+
+```
+<br>
+
+## 结合密度
+
+<details>
+<summary>结合密度介绍</summary>
+<div class=details_text>
+因为nCounter平台的计数是依靠分析识别成像的图片中的荧光条形码(即mRNA三重复合物的荧光信号)进行的，所以图片中需要被捕获的荧光条形码的密度对计数结果有重大影响。为了计数结果的准确，只有不与其他荧光条形码重叠或相互影响的，清晰可辨的独立荧光条形码才会被用于计数步骤。如果图像中荧光条形码饱和度极高，可能会造成较多的荧光条形码重叠，反而导致计数结果的偏差。nCounter仪器使用结合密度(Binding Density)来描述图像中荧光条形码的饱和度，结合密度的单位是每平方微米中荧光条形码的个数。值得注意的是，结合密度指标并不代表样品本身质量如何，仅代表仪器检出效率的适宜范围。
+<br>本项目结合密度质控的阈值设定为<span class="highlight">(0.1, 2.25)</span>，即<span class="highlight">0.1</span>至<span class="highlight">2.25</span>之间的结合密度被认为是最佳荧光条形码捕获范围。若一个样本结合密度超过<span class="highlight">2.25</span>时，该样本可能存在较多荧光条形码相互重叠影响，导致计数不准确的问题；同样的，若一个样本结合密度小于<span class="highlight">0.1</span>时，该样本本身的荧光条形码则较少，计数结果同样不够可靠。结合密度质控的详情可参考[此处](https://nanostring.com/wp-content/uploads/Gene_Expression_Data_Analysis_Guidelines.pdf)。
+</details>
+下方对不同样本结合密度的分布进行了呈现。横轴代表每个样本上机时Lane编号，纵轴代表结合密度数值，即每平方微米范围内荧光条形码的个数，图中每一个点代表一个样本。本项目结合密度质控的阈值设定为<span class="highlight"> (0.1, 2.25) </span>。图中灰色线段代表结合密度质控的阈值，样本点的着色代表了样本是否通过结合密度质控，蓝色为通过质控，红色则为未达到质控阈值标准。
+
+```{r Binding-QC, results = 'asis', fig.width = 9, fig.height = 7}
+
+sample_info_df <- data@unfiltered_anno
+# sample_info_df$Lane.Number <- as.character(sample_info_df$Lane.Number)
+# sample_info_df$FOV.percent <- sample_info_df$FOV.Counted / sample_info_df$FOV.Count
+# sample_info_df$FOV.flag <- ifelse(sample_info_df$FOV.percent < 0.75, 'Failed', 'Passing')
+# data@unfiltered_anno <- sample_info_df
+sample_info_df$Lane.Number <- as.character(sample_info_df$Lane.Number)
+
+p <- ggplot(sample_info_df, aes(x = Lane.Number, y = Binding.Density.QC,
+			color = Binding.Density.QC.Flag)) + 
+	 geom_point(size = 3, alpha = 0.8) + theme_bw() +
+	 xlab("Sample Loaded Lane Label") + 
+	 ylab("Binding Density (Optical Features / Micron^2)") +
+	 # scale_y_log10(breaks = c(100, 500, 1000, 5000),
+     #              labels = c(100, 500, 1000, 5000)) +
+     theme(axis.text.x = element_text(face = "bold",
+     	  # colour = ifelse(sample_info_df$QC.Flag == "YES", "indianred3", "black")
+     	  )) + ylim (0,2.5) +
+	 scale_color_manual("Binding Density Flag", values = c('YES' = desat('indianred3'),
+	 										  'NO' = desat('royalblue3'))) +
+	 geom_hline(aes(yintercept = 0.1, linetype = "Minimum Threshold"),
+                 size = 1, color = "grey") +
+	 geom_text(aes(0, 0.1, label = "Minimum Threshold = 0.1", vjust = -1, hjust = -0.5), 
+	 			color = "grey") +
+	 geom_hline(aes(yintercept = 2.25, linetype = "Maximum Threshold"),
+                 size = 1, color = "grey") +
+	 geom_text(aes(0, 2.25, label = "Maximum Threshold = 2.25", vjust = -1, hjust = -0.5), 
+	 			color = "grey") +
+	 scale_linetype_manual(name = "Cutoffs", values = c(2, 2), 
+                      guide = guide_legend(override.aes = list(color = "grey"))) +
+	 annotate("rect", xmin = -Inf, xmax = Inf, ymin = -Inf,
+               ymax = 0.1, fill = desat("grey"), alpha = 0.3) +
+	 annotate("rect", xmin = -Inf, xmax = Inf, ymin = 2.25,
+               ymax = Inf, fill = desat("grey"), alpha = 0.3)
+
+subchunkify(p, fig_width = 9, fig_height = 7)
+ggsave(paste0(PlotsPath, "QC_Binding_Density.pdf"),
+	   plot = p, width = 9, height = 7)
+
+```
+<br>
+
+## 阳参计数值相关性
+
+<details>
+<summary>阳性参照及其质控方法的介绍</summary>
+<div class=details_text>
+nCounter平台设计中，每个样本中都会有6个阳性参照用以监测实验各步骤。这6个阳参为别为不同的ERCC RNA序列，并人为进行稀释，以固定的浓度梯度呈现。6个阳参的浓度分别为：
+<br> 128fM, 32fM, 8fM, 2fM, 0.5fM, 0.125fM，其中fM为飞摩尔每升，为体积摩尔浓度单位。
+<br>这些阳参被认为和内源性mRNA一样会稳定进行后续实验反应步骤，所以被用来监测从样本制备到杂交的实验全程的技术稳定性。在阳参会稳定被检出的假设基础上，若实验检出效率稳定，则固定浓度梯度的阳参的计数值也应和浓度梯度呈现一致性，即阳参计数值应和浓度梯度具有线性相关性。
+<br>本项目阳参计数值与本身浓度梯度的相关性阈值设定为<span class="highlight">0.95</span>。即，若一个样本不同浓度梯度的阳参得到的检出计数与其对应的浓度相关性不足<span class="highlight">0.95</span>时，该样本可能在实验中杂交步骤存在问题，或分析性能不够可靠。阳参质控的详情可参考[此处](https://nanostring.com/wp-content/uploads/Gene_Expression_Data_Analysis_Guidelines.pdf)。
+</details>
+下方对每个样本中阳参的检出计数分布进行了呈现。横轴代表阳参的浓度梯度分布，纵轴代表阳参对应的检出计数，横轴和纵轴均转换为log2值以便于可视化观察。图中每一个点代表一个样本中的一个阳参，同一个样本中不同浓度梯度的阳参用折线进行连接。折线走势可直观反映阳参计数值与阳参浓度梯度的相关性。本项目阳参计数值与本身浓度梯度的相关性阈值设定为<span class="highlight"> 0.95 </span>。图中着色代表了样本是否通过阳参计数值相关性质控，蓝色为通过质控，红色则为未达到质控阈值标准。
+
+```{r Pos-Linearity-QC, results = 'asis', fig.width = 9, fig.height = 7}
+
+Pos_list <- rownames(data@assay_anno[data@assay_anno$`Class Name` == "Positive", ])
+Pos_df <- data@unfiltered_exp[rownames(data@unfiltered_exp) %in% Pos_list, ]
+rownames(Pos_df) <- c("128", "32", "8", "2", "0.5", "0.125")
+
+sample_info_df <- data@unfiltered_anno
+sample_info_df <- cbind(sample_info_df, t(Pos_df))
+data@unfiltered_anno <- sample_info_df
+
+long_sample_info_df <-  sample_info_df %>% tidyr::gather("Pos.Concentration", "Pos.Count", 
+					c("128", "32", "8", "2", "0.5", "0.125"))
+long_sample_info_df$Pos.Concentration <- as.numeric(long_sample_info_df$Pos.Concentration)
+
+p <- ggplot(long_sample_info_df, aes(x = Pos.Concentration, y = Pos.Count,
+			color=Positive.Control.QC.Flag)) + geom_point(size = 3, alpha = 0.8) +
+	 theme_bw() + xlab("Positive Control Concentration (fM)") + ylab("Counts") +
+	 geom_line(aes(group = Sample.Name)) + 
+	 geom_text_repel(aes(label = Sample.Name),
+	 data = long_sample_info_df[long_sample_info_df$Positive.Control.QC.Flag == "YES" &
+	 						   	long_sample_info_df$Pos.Concentration == 32 ,]) +
+	 scale_color_manual("PC Linearity Flag", values = c('YES' = desat('indianred3'),
+	 										  'NO' = desat('royalblue3'))) +
+	 scale_y_continuous(trans='log2') + scale_x_continuous(trans='log2') 
+	
+
+subchunkify(p, fig_width = 9, fig_height = 7)
+ggsave(paste0(PlotsPath, "QC_Housekeeping_genes_GeoMean.pdf"),
+	   plot = p, width = 9, height = 7)
+
+```
+<br>
+
+## 检测限
+
+<details>
+<summary>检测限及其质控方法的介绍</summary>
+<div class=details_text>
+检测限 (Limit Of Detection, LOD) 是指检测仪器在保证数据产出是可靠的范围之内，可以检出待测物质最小的量。不同技术平台的检测限通常是计算检测平台的背景信号得到的。
+<br>nCounter平台设计中，每个样本中会包含8个阴性探针(阴性参照)用以监测背景信号。对于每一个样本，根据8个阴性探针检测到的背景信号的分布计算，将每个样本<span class="highlight">所有背景信号的平均值加上两个标准差</span>作为样本对应的检测限。
+<br>根据每个样本的阴性参照计算得到样本对应检测限后，用阳性对照探针中，浓度为 <span class="highlight">0.5fM</span> 的 <span class="highlight">Pos E</span> 探针与检测限进行比较来评估样本的质量。若样本对应的 <span class="highlight">Pos E</span>  阳性对照探针的原始计数 <span class="highlight">大于</span> 样本对应的检测限，则认为样本合格。检测限质控的详情可参考[此处](https://nanostring.com/wp-content/uploads/Gene_Expression_Data_Analysis_Guidelines.pdf)。
+</details>
+下方对每个样本中检测限质控相关的数据进行了呈现。横轴代表每一个样本，纵轴代表检出计数。图中浅灰色的箱线图代表每个样本对应的8个阴性探针的检出计数的分布情况，箱线图上浅灰色点则对应8个阴性探针独立的检出计数。图中黄色的线段代表样本对应的检测限，通过上方段落所述的方法用阴性探针的分布计算得到。图中较大的圆点代表了样本对应的 Pos E 0.5fM 浓度的阳性探针，圆点的着色代表了对应样本是否通过检测限质控。当Pos E圆点高于黄色检测限时，样本通过质控且用蓝色着色；反之低于黄色检测限时，样本可能存在检出效率不达标的情况，不通过检测限质控且用红色着色。
+
+```{r LOD-QC, results = 'asis', fig.width = 9, fig.height = 7}
+
+Neg_list <- rownames(data@assay_anno[data@assay_anno$`Class Name` == "Negative", ])
+Neg_df <- data@unfiltered_exp[rownames(data@unfiltered_exp) %in% Neg_list, ]
+
+sample_info_df <- data@unfiltered_anno
+sample_info_df <- cbind(sample_info_df, t(Neg_df))
+# 计算LOD极限值，阴参平均值+2倍标准差，不需计算因为rawdata_anno中有了
+# sample_info_df$LOD.Cutoff <- rowMeans(sample_info_df[ , rownames(Neg_df)]) +
+# 							2* rowSds(as.matrix(sample_info_df[ , rownames(Neg_df)]))
+long_sample_info_df <-  sample_info_df %>% tidyr::gather("Neg.Probe", "Neg.Count", 
+					rownames(Neg_df))
+
+p <- ggplot(long_sample_info_df, aes(x = Sample.Name, y = Neg.Count, 
+	 col = Limit.of.Detection.QC.Flag.of.mRNA)) + 
+	 geom_boxplot(aes(x = Sample.Name, y = Neg.Count, fill = "grey"), 
+	 			 color = "grey", width = 0.5, alpha = 0.5) + 
+	 geom_boxplot(aes(x = Sample.Name, y = Limit.of.Detection.QC.of.mRNA), 
+	 			 color = desat("tan3"), width = 0.7) +
+     geom_jitter(size = 1.5, height = 0, width = 0.05, color = "grey", alpha = 0.9) +
+	 geom_point(aes(x = Sample.Name, y = `0.5`), size = 4) +
+	 scale_color_manual("Limit Of Detection Flag", values = c('YES' = desat('indianred3'),
+	 		    'NO' = desat('royalblue3'), "LOD Threshold" = "tan3")) +
+	 scale_fill_manual(name = "Negative Control", values = "grey", 
+	 				  labels = "Expression Distribution") +
+ 	 theme_bw() + xlab("Sample Names") + ylab("Counts") + 
+	 scale_y_continuous(trans='log2', breaks = c(2,4,8,16,32,64,128),
+	 				    labels = c(2,4,8,16,32,64,128)) +
+	 theme(axis.text.x = element_text(angle = 90, hjust = 1, face = "bold",
+	 colour = ifelse(sample_info_df$Limit.of.Detection.QC.Flag.of.mRNA == "YES",
+	 				"indianred3", "black"))) 
+
+
+# p <- ggplot(long_sample_info_df, aes(x = Sample.Name, y = Neg.Count, 
+# 	 col = Limit.of.Detection.QC.Flag.of.mRNA)) + 
+# 	 geom_point(aes(x = Sample.Name, y = `0.5`), size = 4) +
+# 	 geom_boxplot(aes(x = Sample.Name, y = Neg.Count), width = 0.5,
+# 	 			color = "grey", fill = "grey", alpha = 0.5) + 
+# 	 geom_boxplot(aes(x = Sample.Name, y = Limit.of.Detection.QC.of.mRNA), 
+# 	 			 color = desat("indianred3"), width = 0.7) +
+#      geom_jitter(size = 1.5, height = 0, width = 0.05, color = "grey", alpha = 0.9) +
+# 	 scale_color_manual("Limit Of Detection Flag", values = c('YES' = desat('indianred3'),
+# 	 										  'NO' = desat('royalblue3'))) +
+#  	 theme_bw() + xlab("Sample Names") + ylab("Counts") + 
+# 	 scale_y_continuous(trans='log2', breaks = c(2,4,8,16,32,64,128),
+# 	 				    labels = c(2,4,8,16,32,64,128)) +
+# 	 theme(axis.text.x = element_text(angle = 45, hjust = 1, face = "bold",
+# 	 colour = ifelse(sample_info_df$Limit.of.Detection.QC.Flag.of.mRNA == "YES",
+# 	 				"indianred3", "black"))) 
+
+subchunkify(p, fig_width = 9, fig_height = 7)
+ggsave(paste0(PlotsPath, "QC_LOD_Threshold.pdf"),
+	   plot = p, width = 9, height = 7)
+
+```
+<br>
+
+## 质控信息统计
+
+```{r count-sample-num, results = 'hide'}
+NumSample <- nrow(data@unfiltered_anno)
+NumSample_Pass <- nrow(data@unfiltered_anno[data@unfiltered_anno$QC.Flag == "NO",])
+NumSample_Fail <- nrow(data@unfiltered_anno[data@unfiltered_anno$QC.Flag == "YES",])
+```
+
+经过上述所有的质控步骤，本次分析共计 <span class="highlight">`r NumSample`</span> 个样本中，共有 <span class="highlight">`r NumSample_Pass`</span> 个样本通过所有质控步骤； <span class="highlight">`r NumSample_Fail`</span> 个样本未通过所有质控步骤，数据可靠性较低，不纳入下游数据分析中。下方用表格的方式展现了质控各步骤样本的通过情况。
+
+```{r QC-summary, results = 'asis'}
+
+sample_info_df <- data@unfiltered_anno
+sample_info_df <- sample_info_df[, c("QC.Flag", "HK.Flag", "Imaging.QC.Flag",
+									 "Binding.Density.QC.Flag", "Positive.Control.QC.Flag",
+									 "Limit.of.Detection.QC.Flag.of.mRNA")]
+colnames(sample_info_df) <- c("QC Overall", "HK", "FOV", "Binding Density",
+							  "Pos Ctrl Linearity", "LOD")
+
+sample_info_df <- data.frame(lapply(sample_info_df, function(x) gsub("NO", "Pass", x)))
+sample_info_df <- data.frame(lapply(sample_info_df, function(x) gsub("Borderline", 
+																	 "Pass", x)))
+sample_info_df <- data.frame(lapply(sample_info_df, function(x) gsub("YES", "Fail", x)))
+rownames(sample_info_df) <- rownames(data@unfiltered_anno)
+
+print(kable(sample_info_df, format = 'html', row.names = T,  table.attr = "class=\"epars-tbl\"") %>% scroll_box(height = "450px"))
+cat("<br>")
+```
+
+<br>
+
+# 数据分析
+
+针对质控合格的数据进行了如下数据分析研究，其基本流程如下图所示：
+
+<center>![](`r paste0(Resource_info_Path, "Flowchart/nCounter_Analysis.png") `){width=70%}</center>
+<div class="fig_caption">*上方包含的分析内容以合同约定为准，若不在合同范围内则不进行。*</div>
+
+```{r overall-analysis-dir, results = 'hide'}
+CachePath <- sub('[/][^/]+$', '/2.Overall_Analysis/', gsub('[/]$', '', CachePath))
+PlotsPath <- sub('[/][^/]+$', '/2.Overall_Analysis/', gsub('[/]$', '', PlotsPath))
+create_dir(path.list = c(CachePath,PlotsPath))
+```
+基因表达谱总览的分析相关的数据图表将被保存至 **`r CachePath`**。
+
+## 基因表达谱总览
+
+本部分针对用户所选的Panel进行了基因表达谱的分析，用热图展示。热图分析使用了无监督的层次聚类来分析每个样本的基因表达量之间的相关性。每一列代表一个样本，每一行是一个基因。对每个基因的数值分别进行了归一化处理，让均值为0和标准差为1。将归一化的值在平均值±2倍标准偏差处进行截尾处理，以确保最大比例的数据的颜色分布正常（99% 的数据在平均值的 ± 2倍标准偏差内）。其位于同一簇同一分支的样本在某种程度上是相似的，不同分支的样本相似度则较低。
+
+### 所有分组基因表达热图
+
+下图根据用户给出的分组信息，对所有分组进行聚类热图[@gu2016complex]的展示，可对样本之间表达的相似程度进行推断。其中数据均进行了归一化处理，让均值为0和标准差为1。将归一化的值在平均值±2倍标准偏差处进行截尾处理，以确保最大比例的数据的颜色分布正常（99% 的数据在平均值的 ± 2倍标准偏差内）。默认使用最小方差法ward.D2聚类方法构建距离矩阵，距离值越小则样本之间的相似度越大。其分析结果如下图所示，横轴代表每个样本，纵轴代表用户所选Panel中的每个基因，示例注释列在热图的顶部，图例显示了样本分组信息，其基因表达值用渐变颜色表示：
+<br><dsrcp>`r if("所有分组基因表达热图" %in% names(dscrp_list)){dscrp_list["所有分组基因表达热图"]} `</dsrcp>
+
+```{r heatmap-overall, results = 'asis', fig.width = 8}
+##绘制整体热图，判断是否有分组信息
+
+p <- Overall_Heatmap(data)
+
+if (data@config$group_stat == "Multiple group"){multiple_group <- TRUE} else {multiple_group <- FALSE}
+
+subchunkify(p, fig_width = 8, fig_height = 8)
+save_pdf(p, paste0(PlotsPath, "heatmap_overall", ".pdf"), width = 8, height = 8)
+
+```
+
+`r if(multiple_group == TRUE){"### 单一分组基因表达量热图 {.tabset .tabset-fade}"} `
+
+```{r heatmap-based-on-group, eval = multiple_group, results = 'asis', fig.width = 8}
+cat("根据用户提供的不同分组信息，对每个分组进行了单独的聚类热图[@gu2016complex]分析，可以观察到组别之间基因表达的相似情况。其中数据均进行了归一化处理，让均值为0和标准差为1。将归一化的值在平均值±2倍标准偏差处进行截尾处理，以确保最大比例的数据的颜色分布正常（99% 的数据在平均值的 ± 2倍标准偏差内）。默认使用最小方差法ward.D2聚类方法构建距离矩阵，距离值越小则样本之间的相似度越大。本项目其结果热图展示如下，横轴代表每个样本，纵轴代表用户所选Panel中的每个基因，示例注释列在热图的顶部，图例显示了样本分组信息，其基因表达值用渐变颜色表示，根据与项目中实验设计方案有关的样本分组信息(")
+cat(data@heatmap_groups, sep=", ")
+cat(")，下方按标签页展示了不同着色方式的聚类热图：")
+cat(space)
+
+#按分组画热图
+template <- "#### %s {.unlisted .unnumbered}"
+if(data@config$group_stat == "Multiple group"){
+  #有多个分组
+  data_single = data
+  for (i in data@heatmap_groups){
+    data_single@heatmap_groups = c(i)
+    data_single <- epars_plot_setting(data_single)
+    data_single <- epars_heatmap_anno_data(data_single)
+    
+    #样本按分组排序
+    rownames(data_single@plot_setting$group_df) <- paste(rownames(data_single@plot_setting$group_df),
+                                                         data_single@plot_setting$group_df[,1],sep="_")
+    colnames(data_single@exp) = rownames(data_single@plot_setting$group_df)
+  group_df_order = order(data_single@plot_setting$group_df[,1])
+  ordered_sample <- rownames(data_single@plot_setting$group_df)[group_df_order]
+
+	FigWidth <- 0.1 * nrow(data@anno) + 3
+    #配置单分组的显示样式
+    heat_mat <- htmp_scale(data_single@exp[1:500,])
+    
+	p <- Heatmap(heat_mat,show_column_names = TRUE, 
+				show_row_names = FALSE,
+				heatmap_legend_param = list(title = "",legend_height = unit(4, "cm")),
+				column_order = ordered_sample,
+				column_names_rot = -90,
+				row_names_gp =  gpar(fontsize = 4),
+				column_names_gp =  gpar(fontsize = 5),
+				clustering_method_rows = "ward.D2",
+				name = "Scale(exp)",
+				cluster_column_slices = F,
+				cluster_rows = T,
+				heatmap_width = unit(5, "npc"),
+				heatmap_height = unit(7, "npc"),
+				clustering_method_columns = "ward.D2",
+				top_annotation = data_single@plot_setting$heatmap_anno,
+				col = data@config$heatmap_color
+	)
+    
+    
+    cat(sprintf(template, paste0(i)))
+	subchunkify(p, fig_width = FigWidth)
+	cat(space)
+	suppressMessages(save_pdf(p, paste0(PlotsPath, "heatmap_based_on_group_", i, ".pdf"), width = FigWidth))
+  }
+}
+
+```
+### {.unlisted .unnumbered}
+<br>
+
+## 样本相关性分析
+
+<details>
+<summary>相关性分析介绍</summary>
+<div class=details_text>
+相关性分析，Correlation Analysis，是指对两个或多个具备相关性的变量元素进行分析，从而衡量两个变量因素的相关密切程度。相关性的元素之间需要存在一定的联系或者概率才可以进行相关性分析。
+<br>相关性分析中最常用的方法为皮尔森相关系数。皮尔森积矩相关系数(Pearson product-moment correlation coefficient，Pearson's r)用于度量两个变量X和Y之间的相关程度（线性相关），其值介于-1与1之间。该系数广泛用于度量两个变量之间的线性相关程度。
+计算x和y的相关性参数$r_{xy}$的方式如下：
+$$r_{xy} = \frac{cov(x,\ y)}{\sqrt{var(x)}\ *\ \sqrt{var(y)}}$$
+</details>
+进一步分析各样本之间的相关性，对用户选取的样本总体表达进行相关性分析[@corrplot2021]。
+<br>样本之间的两两相关性以Pearson系数的方式被计算，数值分布在[-1,1]。Pearson系数值为0时代表两样本之间无线性关系。数值的绝对值越高，样本之间的相关性也越高。正值代表样本之间呈正相关关系，负值代表样本之间呈现负相关关系。
+下图呈现的是所有样本间的相关性，横纵轴均代表每个样本，各样本名称显示在顶部和左侧，渐变颜色显示样本间Pearson相关系数值，从[-1,1]以从蓝至红梯度显示。
+<br><dsrcp>`r if("样本相关性分析" %in% names(dscrp_list)){dscrp_list["样本相关性分析"]} `</dsrcp>
+
+```{r sample-correlation, results = 'hide', fig.width = 8, fig.height = 7}
+cor_matrix <- cor(data@exp)
+# corrplot(cor_matrix, method="circle",type="full",order="hclust",hclust.method="ward.D2",tl.cex = 0.5)
+corrplot.mixed(cor_matrix, lower = "circle", upper="circle", order="hclust",hclust.method="ward.D2",tl.cex = 0.5, tl.pos = "lt", tl.col = desat("black"), 
+lower.col = colorRampPalette(desat(c("royalblue3", "grey97", "indianred3")))(10),
+upper.col = colorRampPalette(desat(c("royalblue3", "grey97", "indianred3")))(10))
+
+# corrplot.mixed(cor_matrix, lower = "square", upper="circle", order="hclust",hclust.method="ward.D2",tl.cex = 0.5, tl.pos = "lt", tl.col = desat("black"), 
+# lower.col = colorRampPalette(desat(c("royalblue3", "grey97", "indianred3")))(10),
+# upper.col = colorRampPalette(desat(c("royalblue3", "grey97", "indianred3")))(10))
+# cor.plot <- corrplot(corr = cor_matrix, col = colorRampPalette(c("blue", "white", "red"))(10),
+# 					 type = "upper", tl.pos = "t", tl.cex = 0.75)
+# cor.plot <- corrplot(corr = cor_matrix, col = colorRampPalette(c("blue", "white", "red"))(10),
+# 					 type = "lower", add = TRUE, method = "color", addCoef.col="black", 
+# 					 diag = FALSE, tl.pos = "l", tl.cex = 0.75, number.cex = 0.7)
+```
+
+
+## 降维算法
+
+<details>
+<summary>降维介绍</summary>
+<div class=details_text>
+降维(Dimensional Reduction Technique)是一种统计学/机器学习方法，其目的为从一个大体量(高维度)的数据中，筛除冗余或无关变量并从原有变量中找出主要变量。**特征选择 (Feature Selection)** 和**特征提取 (Feature Projection / Feature Extraction)** 是对高维度数据结构处理的典型方法。
+<br>·**特征选择**：提取数据子集，简化数据模型，去掉冗余和无关数据。
+<br>冗余数据: 数据可以展现整体数据的特征，拥有生物学意义，但是与其他特征强相关。
+<br>无关数据: 低质量数据，基本无法体现特征。
+<br>特征选择应用场景: 机器学习、数据挖掘、多类型的高维生信数据，比如DNA微阵列、表达谱、单细胞、SNPs等。
+<br>·**特征提取**：和特征选择相似，从高维度数据 (多个特征向量空间)中简化数据模型，去掉冗余和无关信息，提升计算处理效率。其理论支撑是认为数据都是有结构的，在低维度的数据结构中精炼提取数据结构的核心信号。降维处理后可产生低维度可视化图像，用于研究中的分析理解。
+
+<br>为了解不同分组之间样本中基因表达的相似或不同之处并观察在数据变化的呈现上是否存在样本分组间的偏见，我们采用了狭义上的降维，即特征提取，来识别相似片段的簇。特征提取其中又可分为**线性降维**与**非线性降维**。
+<br>·**线性降维**：低维向量的分量由相应高维向量的分量的线性函数给出，所以低维空间一定是线性变化出的空间中的一个。线性降维方法包含 Principal Component Analysis (PCA)，Linear Discriminant Analysis (LDA)， Independent Component Analysis (ICA) 等。
+<br>·**非线性降维**：假设数据在高维空间中不是线性结构，而是非线性的流形。只有在足够小的范围内可以局部欧几里得空间化，用小规模的线性关系来表示局部数据点的分布，整体上试图在低维空间尽可能保留高维数据的流形结构。非线性降维方法包含 T-distributed Stochastic Neighbor Embedding (t-SNE/tSNE), Uniform Manifold Approximation and Projection(UMAP)，Isomap，Locally-Linear Embedding (LLE), Autoencoder 等。
+</details>
+
+### PCA降维 {.tabset .tabset-fade}
+
+<details>
+<summary>PCA介绍</summary>
+<div class=details_text>
+主成分分析，Principle Component Analysis（PCA），是用来探索和简化多变量复杂关系的常用方法，即通过降维找到数据间差异的最主要特征。PCA是**线性降维**中最重要的方法。
+<br> 在表达谱数据中，样本之间的关系即为每个样本中Assay的表达。 样本在每一个Assay表达的差异可被视为一个单独的维度，整个表达谱即所有的Assay表达共同汇聚成一个多维空间。PCA试图从此多维空间中将特征提取为主成分(Principle Component, PC)。每个主成分解释了数据中一定百分比的变化。进行主成分分析前数据进行缩放，找到特征向量（主成分，PC）来聚类样本，并展示样本在包含最大的数据差异的前两个主成分上的分布。
+</details>
+为了探究各样本之间的关系，使用主成分分析(PCA)分析样本差异的主要特征。在如下的二维点阵图中，每一个点为一个样本，横轴代表的是第一主成分，纵轴是第二主成分，轴坐标同时显示此主成分可以解释的数据间差异所占总数据差异的百分比。降维可视化的理论中，点阵图上越接近的一组数据点在对应样本的整体表达水平也会更加相似。根据与项目中实验设计方案有关的样本分组信息（**`r data@heatmap_groups`**），下方按标签页呈现了不同着色方式的PCA图像，图例均为样本分组的着色信息。
+<br><dsrcp>`r if("PCA降维" %in% names(dscrp_list)){dscrp_list["PCA降维"]} `</dsrcp>
+
+```{r PCA-plot, results = 'asis', fig.height = 7, fig.width = 8}
+# PCA plot
+template <- "#### %s {.unlisted .unnumbered}
+"
+data <- PCA_plot(data, CachePath = CachePath,
+							  group = data@heatmap_groups, 
+							  color_palette = data@config$pan_color,
+							  template = template, space = space,
+							  prefix = "PCA")
+
+```
+<br>
+
+此外，如下的Loading Plot(PCA Arrow Plot)则从基因层面拆分剖析了单个基因对主成分的影响。如下图所示每个箭头指代一个基因，对应基因的名称在箭头头部呈现。横纵坐标分别为PCA分析中的第一主成分和第二主成分。箭头的长度越长代表此基因对主成分分析的影响越大。
+<br><dsrcp>`r if("基因主成分分析" %in% names(dscrp_list)){dscrp_list["基因主成分分析"]} `</dsrcp>
+
+```{r PCA-loading-plot, results = 'asis', fig.height = 7, fig.width = 8}
+
+PCA_arrow_plot(data, CachePath = CachePath, nfeature = 15, prefix = "PCA_arrow")
+
+```
+
+### tSNE降维 {.tabset .tabset-fade}
+
+<details>
+<summary>tSNE介绍</summary>
+<div class=details_text>
+t-distributed Stochastic Neighbor Embedding (t-SNE/tSNE) [@van2008visualizing]是特征提取中非线性降维的方法之一。tSNE的步骤可以被概括为：
+<br>1. tSNE构建一个高维对象之间的概率分布，使得相似的对象有更高的概率被选择，而不相似的对象有较低的概率被选择；
+<br>2. tSNE在低维空间里在构建这些点的概率分布，使得这两个概率分布之间尽可能的相似。
+<br>值得注意的是，tSNE算法已被认为存在些许缺陷。最主要的缺陷是tSNE的图像趋向于保留局部结构，缺乏全局的保留，即只有近距离/聚类内部的数据点间距离保留了充分的意义，而远距离数据点的不相似性不能保证(即降维图中相近的细胞更加相似，但距离很远的细胞并不一定意味着更不相似)。此外tSNE在K-nearest neighbor步骤时会运用过量内存导致计算成本相较其他方法偏高。
+</details>
+为了探究各样本之间关系，使用tSNE降维分析样本差异的主要特征。在如下的二维点阵图中，每一个点为一个样本，横轴和纵轴代表的是经tSNE降维处理后的二维坐标轴，每一个点对应一个样本。降维可视化的理论中，点阵图上越接近的一组数据点在对应样本的整体表达水平也会更加相似。根据与项目中实验设计方案有关的样本分组信息（**`r data@heatmap_groups`**），下方按标签页呈现了不同着色方式的tSNE二维化图像，图例均为样本分组的着色信息。
+<br><dsrcp>`r if("tSNE降维" %in% names(dscrp_list)){dscrp_list["tSNE降维"]} `</dsrcp>
+
+```{r tSNE-plot, results = 'asis', fig.height = 7, fig.width = 8}
+# UMAP plot
+template <- "#### %s {.unlisted .unnumbered}
+"
+data <- tSNE_plot(data, CachePath = CachePath, outlier_label = T,
+							  group = data@heatmap_groups,
+							  color_palette = data@config$pan_color,
+							  template = template, space = space,
+							  prefix = "tSNE")
+
+```
+
+### UMAP降维 {.tabset .tabset-fade}
+
+<details>
+<summary>UMAP介绍</summary>
+<div class=details_text>
+Uniform Manifold Approximation and Projection (UMAP) [@mcinnes2018umap]是另一个非线性降维方法。UMAP 总体上遵循tSNE的理念，但引入了许多改进，如不同的cost function以弥补全局信息的保留，normalization的免除等等。
+具体算法的区别包括，用binary Cross-Entropy (CE) 作为它的cost function，与 tSNE的KL-divergence不同，成对欧几里得距离的概率不会指数级衰减。在高维中使用exponential probability distribution取代Euclidean distances，在低维中curves 1 / (1+a*y^(2b)) 取代t-distribution，
+用nearest neighbors个数代替tSNE的perplexity。因为计算方式，概率已经属于[0,1]，不采用额外normalization，和tSNE相比会显著降低运算时间。
+<br>UMAP现在被更多学者接受，认为在大多数情况下是比tSNE更有效的非线性降维方式。实际情况中仍需根据数据分布等具体情况选择降维方法。对体量较大的数据，现在学术界部分认为PCA筛选后再结合非线性降维UMAP是最有效且准确的降维可视化方案，但因具体数据类型的多样性原因并没有公认的最佳方案和标准流程的共识。
+</details>
+为了探究各样本之间的关系，使用UMAP降维分析样本差异的主要特征。在如下的二维点阵图中，每一个点为一个样本，横轴和纵轴代表的是经UMAP降维处理后的二维坐标轴，每一个点对应一个样本。降维可视化的理论中，点阵图上越接近的一组数据点在对应样本的整体表达水平也会更加相似。根据与项目中实验设计方案有关的样本分组信息（**`r data@heatmap_groups`**），下方按标签页呈现了不同着色方式的UMAP二维化图像，图例均为样本分组的着色信息。
+<br><dsrcp>`r if("UMAP降维" %in% names(dscrp_list)){dscrp_list["UMAP降维"]} `</dsrcp>
+
+```{r UMAP-plot, results = 'asis', fig.height = 7, fig.width = 8}
+# UMAP plot
+template <- "#### %s {.unlisted .unnumbered}
+"
+data <- UMAP_plot(data, CachePath = CachePath, outlier_label = T,
+							  group = data@heatmap_groups, n_neighbors = 3,
+							  color_palette = data@config$pan_color,
+							  template = template, space = space,
+							  prefix = "UMAP")
+
+```
+
+<br>
+
+## 差异分析
+
+<details>
+<summary>差异分析命名介绍</summary>
+<div class=details_text>
+差异分析模块的个性化程度很高。主要包括如下几个方面：
+<br>**a.**同一份报告往往囊括多个差异分析模块，探究不同组别间的差异；
+<br>**b.**对每一次差异比较，往往存在需要对数据进行不同方式的筛选后再进行差异分析；
+<br>**c.**若某个注释信息包含多个类别时，差异分析的两两比较需要明确指定分组类别；
+<br>面对此种个性化程度高的差异分析数据输入，我们在分析以及呈现中将差异分析模块的信息尽量完整地展示。
+<br>对应在下方报告每一个差异分析分组模块，模块标签的呈现将包含：
+<br> **1.** 差异分析中想要探究差异的分组 ；
+<br> **2.** 此分析用于限定样本亚群所需的筛选信息。
+<br> 模块标签的范例如下：
+<br> **"Response的差异"**
+<br> 该标签意义：在所有样本之中，去研究不同的Response分组之间每个基因的差异表达。
+<br> **"Sex为Male的Response的差异"**
+<br> 该标签意义：在Sex为Male的样本亚群之中，去研究不同的Response分组之间每个基因的差异表达。
+<br> **"Sex为Male，且Segment为TME的Response的差异"**
+<br> 该标签意义：对样本先进行多次筛选，在Sex为Male、且Segment也为TME的样本亚群之中，去研究不同的Response分组之间每个基因的差异表达。
+<br> **"Segment为TME的Patient中病人2比病人1的差异"**
+<br> 该标签意义：在Segment为TME的样本亚群中，去研究Patient标签信息为病人2与病人1之间表达的差异。若Patient包含其他类别，如病人3、病人4等，则会被排除在分析之外。此标注方式允许了在一个注释信息有较多种类别时中挑选其中的两个分组研究其间的差异表达。
+</details>
+针对用户所选Panel中的基因，根据用户提供的分组信息，对其进行表达差异分析，以研究在不同条件下表达有显著差异的基因，或在不同因素下基因突变等结构发生改变导致差异的基因。基于技术平台的数据类型，本项目主要使用edgeR方法进行差异检测[@robinson2010edger]。
+
+```{r DE-dir, results = 'hide'}
+CachePath <- sub('[/][^/]+$', '/3.Differential_Expression/', gsub('[/]$', '', CachePath))
+PlotsPath <- sub('[/][^/]+$', '/3.Differential_Expression/', gsub('[/]$', '', PlotsPath))
+create_dir(path.list = c(CachePath,PlotsPath))
+```
+差异分析相关的数据图表将被保存至 **`r CachePath`**。
+
+### Gene差异分析
+
+<details>
+<summary> Fold Change, p-value 和 q-value 介绍</summary>
+<div class=details_text>
+**Fold Change**，即为不同组别中样本同一个基因表达水平的变化倍数，是用于检测差异表达基因的最基本的方法，其能够直接地得到两个实验组别间的基因表达差异比较。一般分析常用阈值为log2(Fold Change) > 1，即两个组别中的表达相差两倍以上。本次项目中使用的阈值为：**`r data@config$deg$lfc_cutoff `**。需注意的是，单独观察log2(Fold Change)可能存在误区，基因表达丰度的问题(基因信号值偏低等)会对Fold Change产生影响。
+<br> **P值(p-value)**是统计学检验变量，代表着差异的显著性。T检验是差异基因表达检测中的常用统计方法，对每个基因进行p-value的计算，就可以在统计学角度衡量此基因假阳性的概率。如果p-value越低，那么挑选该基因出现假阳性的概率越低，其差异显著的可验证性就越高。
+<br> **Q值(q-value)**则是在P值(p-value)基础之上进一步基于多重检验校正的统计学检验变量。在较大的生物学项目中，单次检验的数量级庞大，即项目往往存在多重检验效应(multiple test)。统计学角度基于单次比较的检验标准会相对显得宽松，在单次检验且对象增多时的叠加效应使得阳性错误的整体概率增加。q-value的原理即为按照阳性错误(假阳性)出现的概率相对应提高p-value判断的标准，从而在多重检验中降低总体犯错的概率[@benjamini1995controlling]。一般分析常用的阈值为FDR < 0.05，其含义为：对于一个单次差异表达检验中无论得到多少个差异基因，这些差异基因中出现假阳性的概率在5%以内。本次项目中使用的阈值为：**`r data@config$deg$fdr_cutoff `**。
+<br>p-value和q-value的具体计算方式如下：
+$${p{\text -}value}(x) = \inf _{\Gamma _{\alpha }\ :\ t\ \in \ \Gamma _{\alpha }\ } Pr\ (H=0\ |\ T \in \Gamma _{\alpha })$$
+$${q{\text -}value}(x) = \inf _{\Gamma _{\alpha }\ :\ t\ \in \ \Gamma _{\alpha }\ } pFDR\ (\Gamma _{\alpha })$$
+</details>
+在利用数据比较分析不同组别中同一个基因是否存在差异表达时，一般选取两个标准：差异表达倍数（Fold Change）和Q值，即经FDR校正后的P值（False Discovery Rate (FDR) corrected P Value）。
+<br>本次项目中鉴别是否显著差异表达使用的阈值为：False Discovery Rate (FDR) 值<**`r data@config$deg$fdr_cutoff `**，同时log2 (Fold Change)的绝对值>**`r data@config$deg$lfc_cutoff `**。
+
+```{r DEG-calculation, results = 'asis', fig.width = 6, fig.height = 6}
+
+# Based on the input string information for DEG groups, setup basic structure
+#  for deg_object_list before any DE calculation.
+deg_object_list <- setup_deg_object_from_string(data@deg_groups, object_name = "data")
+# deg_object_list is a list of S4 objects, type `deg_data`
+
+# Based on the deg_object_list information, filter data
+# to meet with each of the DE methods requirements.
+for (g_complex in 1:length(deg_object_list)){
+	# 使用整理好的过滤信息对样本进行过滤
+	count = data@exp
+	groupinfo <- factor(data.frame(data@anno)[[deg_object_list[[g_complex]]@groupinfo[[1]] ]])
+	if (deg_object_list[[g_complex]]@filtering_boolean == FALSE && length(deg_object_list[[g_complex]]@groupinfo) == 1){
+			deg_object_list[[g_complex]]@filtered_sample <- colnames(data@exp)
+			deg_object_list[[g_complex]]@filtered_matrix <- count
+	} else{
+		tmp_filtered_list <- list()
+		# 针对每一个AOI筛选条件对每个AOI进行判断
+		for (per_filter in 1:length(deg_object_list[[g_complex]]@filtering_list)){
+			tmp_filtered_list[[per_filter]] <- eval(parse(text = 
+								deg_object_list[[g_complex]]@filtering_list[[per_filter]]))
+		}
+		# 取交集，所有筛选条件均通过的样本被留存下来
+		tmp_filtered_list <- Reduce("&",tmp_filtered_list)
+		deg_object_list[[g_complex]]@filtered_sample <- colnames(data@exp)[tmp_filtered_list]
+		deg_object_list[[g_complex]]@filtered_matrix <- count[ ,tmp_filtered_list]
+		groupinfo <- factor(groupinfo[tmp_filtered_list])
+	}
+	# # 去除管家和IGG相关Assay
+	# hk_igg_assay <- append(data@config$igg_names, data@config$hk_names)
+	# deg_object_list[[g_complex]]@filtered_matrix <- deg_object_list[[g_complex]]@filtered_matrix[!row.names(deg_object_list[[g_complex]]@filtered_matrix) %in% hk_igg_assay,]
+	tmp_deg <- obtain_edgeR_DE(matrix = deg_object_list[[g_complex]]@filtered_matrix,
+						groupinfo = groupinfo, 
+						lfc_cutoff = data@config$deg$lfc_cutoff,
+				  		fdr_cutoff = data@config$deg$fdr_cutoff, 
+				  		outdir = CachePath, 
+	  					prefix = paste0("DE_list_" ,deg_object_list[[g_complex]]@label_string))
+	# save the deg result back into the deg_object_list, in the result_df
+	deg_object_list[[g_complex]]@result_df <- tmp_deg
+}
+
+# save the deg_object_list result S4 object back into the toal 
+# data, inside the @deg section.
+for (i in names(deg_object_list)){
+	data@deg[[i]] <- deg_object_list[[i]]
+}
+
+# 给差异分析增加人类可读的描自然语言描述
+for (g in names(data@deg)){
+	tmp_groupinfo <- data@deg[[g]]@groupinfo[[1]]
+	if (length(data@deg[[g]]@groupinfo) >= 2){
+		tmp_groupinfo_1 <- data@deg[[g]]@groupinfo[[2]]
+		tmp_groupinfo_2 <- data@deg[[g]]@groupinfo[[3]]
+	} else{
+		tmp_groupinfo_1 <- levels(factor(data@anno[[data@deg[[g]]@groupinfo[[1]]]]))[1]
+		tmp_groupinfo_2 <- levels(factor(data@anno[[data@deg[[g]]@groupinfo[[1]]]]))[2]
+	}
+	
+  data@deg[[g]]@natural_annotation <- paste0(sprintf("\n\n 此差异分析研究的是从 **%s** 的数值中分析 **%s** 和 **%s** 两个组别的样本 之间的差异表达。如果一个基因在此差异表达中**上调(UP)**，代表着 **%s** 的样本中此基因的表达相对 **%s** 的样本表达**增高**，相反**下调(DOWN)**代表 **%s** 的样本中此基因的表达相对 **%s** 的样本表达**降低**。",   paste0(tmp_groupinfo),
+							paste0(tmp_groupinfo_1), paste0(tmp_groupinfo_2), 
+							paste0(tmp_groupinfo_2), paste0(tmp_groupinfo_1),
+  							paste0(tmp_groupinfo_2), paste0(tmp_groupinfo_1)))
+}
+```
+
+### 差异基因火山图 {.tabset .tabset-fade}
+
+本项目中使用火山图的形式展示差异表达基因的Fold Change，及FDR值，其结果如下：横轴显示基因表达差异倍数的log2变换值，纵轴表示FDR的-log10变换值，每一个点代表一个基因，点的颜色表征差异表达基因是否显著差异表达，图中灰色的基因表示在对应的差异分析中未见差异表达，蓝色对应为表达下调，红色对应为表达上调。根据用户提供的样本信息，分组结果按标签页排列显示。
+<br><dsrcp>`r if("差异基因火山图" %in% names(dscrp_list)){dscrp_list["差异基因火山图"]} `</dsrcp>
+
+```{r DEG-volcano, results = 'asis', fig.width = 6, fig.height = 6}
+template <- "#### %s {.unlisted .unnumbered}
+"
+for (g in names(data@deg)){
+  cat(sprintf(template, paste0(data@deg[[g]]@label_string)))
+  cat(sprintf("<details><summary>此差异分析比较的信息：</summary><div class=details_text> %s </details>", paste0(data@deg[[g]]@natural_annotation)))
+  # cat(data@deg[[g]]@natural_annotation)
+  p <- suppressMessages(volcano_edgeR_plot(data@deg[[g]]@result_df, genelist = NULL, 
+  						FDRcutoff = data@config$deg$fdr_cutoff,
+  						lfc = data@config$deg$lfc_cutoff,
+  						num_label_each = data@config$deg$volcano_num_label_each))
+  
+  subchunkify(p, fig_width = 8)
+  ggsave(paste0(PlotsPath, "DEG_volcano_", gsub(" ", "_", g),".pdf"),
+	   plot = p, width = 9, height = 9)
+  cat(space)
+}
+```
+### {.unlisted .unnumbered}
+<br>
+
+### 差异基因表格 {.tabset .tabset-fade}
+
+用表格的形式展示差异基因的具体分析结果。每一行对应一个assay即基因，表格中呈现了每个基因在两个分组中代表差异显著性的p值和基因在两组之间发生改变的具体方向。其中对于每一个基因，若其False Discovery Rate (FDR) 值<阈值**`r data@config$deg$fdr_cutoff `**，同时 log2(Fold Change)的绝对值>阈值**`r data@config$deg$lfc_cutoff `**，则会在Change中被标记为显著(UP or DOWN)并呈现在下方表格中。依照所选的差异分析分组信息，阈值筛选后的差异表达的基因结果按标签页排列显示。
+<br><dsrcp>`r if("差异基因表格" %in% names(dscrp_list)){dscrp_list["差异基因表格"]} `</dsrcp>
+
+```{r DEG-table, results = 'asis', fig.width = 6, fig.height = 6}
+template <- "#### %s {.unlisted .unnumbered}
+"
+for (g in names(data@deg)){
+  cat(sprintf(template, paste0(data@deg[[g]]@label_string)))
+  cat(sprintf("<details><summary>此差异分析比较的信息：</summary><div class=details_text> %s </details>", paste0(data@deg[[g]]@natural_annotation)))
+  # cat(data@deg[[g]]@natural_annotation)
+  cat("\n")
+	print(kable((data@deg[[g]]@result_df %>% dplyr::filter(change != "NOT")),
+				format = 'html', row.names = T, 
+				table.attr = "class=\'epars-tbl\'") %>% row_spec(0, bold = T, color = "white", background = "#4E84CC") %>% kable_material("striped") %>% scroll_box(height = "450px"))
+
+  cat(space)
+}
+
+```
+### {.unlisted .unnumbered}
+<br>
+
+### 差异基因热图 {.tabset .tabset-fade}
+
+对得到的差异基因进行聚类分析，热图[@gu2016complex]展示结果如下，其中数据均进行了归一化处理，让均值为0和标准差为1。将归一化的值在平均值±2倍标准偏差处进行截尾处理，以确保最大比例的数据的颜色分布正常（99% 的数据在平均值的 ± 2倍标准偏差内）。默认使用最小方差法ward.D2聚类方法构建距离矩阵，距离值越小则样本之间的相似度越大。本项目通路聚类分析结果如下，横轴代表每个样本，纵轴代表分组中差异表达的基因，示例注释列在热图的顶部，图例显示了样本分组信息，其基因表达值用渐变颜色表示，基因名按行显示并列在热图的右侧，根据用户提供的样本信息，分组结果按标签页排列显示。
+<br><dsrcp>`r if("差异基因热图" %in% names(dscrp_list)){dscrp_list["差异基因热图"]} `</dsrcp>
+
+```{r DEG-heatmap, results = 'asis', fig.width = 10}
+template <- "#### %s {.unlisted .unnumbered}
+"
+
+for (g in names(data@deg)){
+	data_single = data
+	data_single@exp <- data_single@exp[ , which(colnames(data_single@exp) %in% (data@deg[[g]]@filtered_sample))]
+	data_single@anno <- data_single@anno[ which(rownames(data_single@anno) %in% (data@deg[[g]]@filtered_sample)), ]
+	data_single@heatmap_groups =  gsub("\\(.*","", sapply(strsplit(g, ","), "[", 1))
+    data_single <- epars_plot_setting(data_single)
+    data_single <- epars_heatmap_anno_data(data_single)
+    top_anno <- data_single@plot_setting$heatmap_anno
+	filtered_list <- rownames(data@deg[[g]]@result_df %>% 
+							  	dplyr::filter(data@deg[[g]]@result_df$change != "NOT"))
+	mtx <- subset(data_single@exp, rownames(data_single@exp)
+				   %in% filtered_list)
+	p <- plot_Heatmap(mat = mtx, anno = top_anno,
+					  scale = TRUE, cluster_rows = T, show_row_names = T,
+					  htmp_color = data@config$heatmap_color)
+	cat(sprintf(template, paste0(data@deg[[g]]@label_string)))
+	cat(sprintf("<details><summary>此差异分析比较的信息：</summary><div class=details_text> %s </details>", paste0(data@deg[[g]]@natural_annotation)))
+	# cat(data@deg[[g]]@natural_annotation)
+	subchunkify(p, fig_width = 10)
+	suppressMessages(save_pdf(p, paste0(PlotsPath, "DEG_heatmap_of_", g, ".pdf"), width = 10))
+	cat(space)
+}
+```
+### {.unlisted .unnumbered}
+<br>
+
+## 差异富集分析
+
+基因富集分析是分析基因表达信息的一种方法，其流程是将表达谱类型的新产出数据按照先前研究验证的预定义知识，也就是验证后的基因组功能通路注释信息，进行分类富集。
+<br>通路富集的必要性在于，若只依据差异表达基因队列进行探索，无法分辨出具有生物学意义的差异与实验技术误差的边界；无法将表达差异与具有生物学意义的结论链接，全面地解释生物学现象。同时，具有生物学意义的通路上的基因往往不一定会成为最具显著差异的那几个基因。基因通路相关基因的整体富集造成具有生物学意义的影响比单个基因的表达更值得研究。
+<br>通过对不同差异分析分组的差异基因的富集分析，可以从基因集合的水平上推测差异表达与哪些具有生物学功能的通路相关。此处对差异分析上下调的基因分别进行利用GO数据库、KEGG数据库的，使用GSEA方法的富集分析。
+<details>
+<summary> GO，KEGG 和 GSEA 的介绍</summary>
+<div class=details_text>
+**GO**全称为 Gene Ontology[@ashburner2000gene]，其根源是生物信息学的方法论。该方法通过既往研究，对跨物种的基因和基因相关产物的信息和功能的汇总，标准化了各基因的注释描述从而便于生命科学研究的开展。GO主要包含三个大类，分别从Cellular Component，Moleculer Function， Biological Process三方面对基因进行详细的分类注释。在功能富集分析中，GO其实狭义上指的是利用Gene Ontology Consortium，即GO方法论总结储存的数据库，对现有表达谱进行功能富集分析。
+<br>**KEGG**全称为 Kyoto Encyclopedia of Genes and Genomes[@kanehisa2000kegg]，与GO类似，是由日本京都大学于人类基因组计划时领衔提出的项目，同样是对基因组，酶促途径和生物化学物质之间的复杂关系进行了全面的梳理，构建了全面的互作网络关系。
+<br>**GSEA**全称为 Gene Set Enrichment Analysis，是美国Broad Institute开发的基因富集分析方法学之一[@subramanian2005gene]。通过与预定义的基因集在基因位置、性质、互作关系、生物学功能等层面的比较后，将已知基因进行分组归类。与先前方法相比的不同之处在于：
+<br>GSEA之前，富集分析通过将差异表达中头尾最显著的基因队列与GO/KEGG数据库进行对比，计算哪些通路上有输入基因队列的富集，再利用统计学检验筛选出显著富集的通路。此方法只考虑差异表达基因的基因本身，并不对基因队列进行排序，队列中最具显著差异的基因和略微有差异的基因是被相同对待的，忽视了差异表达基因之间表达变化大小的权重。同时人为的阈值选择不可避免的带入了主观性影响。
+<br>GSEA的核心变化是在研究差异表达基因队列时，将基因队列按照差异表达的log2FC(或其他排列方式)按序排列，具有最大差异的基因会在队列最前方，在功能富集分析时将基因的差异表达程度的影响纳入分析考虑的参数。在实际分析中，先验知识的基因注释参照信息也会进行排序。待测数据集将会被观测是在排序的参照数据集里随机分布，还是会富集在参照数据集的头部或尾部。若待测数据集存在某种偏向性的富集则说明在此对应功能通路上具有生物学意义的显著。GSEA不会具有主观性的筛选显著表达的基因，而是关注整体趋势不被显著性束缚，更符合通路富集其分析本身的意义。
+</details>
+
+```{r pathway-dir, results = 'hide'}
+CachePath <- sub('[/][^/]+$', '/4.Enrichment_Analysis/', gsub('[/]$', '', CachePath))
+PlotsPath <- sub('[/][^/]+$', '/4.Enrichment_Analysis/', gsub('[/]$', '', PlotsPath))
+create_dir(path.list = c(CachePath,PlotsPath))
+```
+富集分析相关的数据图表将被保存至 **`r CachePath`**。
+<br><dsrcp>`r if("差异富集分析" %in% names(dscrp_list)){dscrp_list["差异富集分析"]} `</dsrcp>
+
+```{r enrich-calculation, results = 'asis', fig.width = 12, fig.height = 13}
+for (g in names(data@deg)){
+	message("Executing enrichment analysis for DE group | ",g, " | ...")
+	tmp_deg <- data@deg[[g]]@result_df
+	
+	# for UP
+	tmp_deg_up <- tmp_deg %>% dplyr::filter(tmp_deg$logFC >= 0)
+	# tmp_deg_up <- tmp_deg %>% dplyr::filter(change == "UP")
+	filtered_up <- tmp_deg_up[,"logFC"]
+	names(filtered_up) <- suppressMessages(tranSymbol(as.character(
+										rownames(tmp_deg_up))))$ENTREZID
+	filtered_up <- filtered_up[unique(names(filtered_up))]
+	filtered_up <- sort(filtered_up, decreasing = TRUE)
+	
+	# for DOWN
+	tmp_deg_down <- tmp_deg %>% dplyr::filter(tmp_deg$logFC <= 0)
+	filtered_down <- tmp_deg_down[,"logFC"]
+	names(filtered_down) <- suppressMessages(tranSymbol(as.character(
+										rownames(tmp_deg_down))))$ENTREZID
+	filtered_down <- filtered_down[unique(names(filtered_down))]
+	filtered_down <- sort(filtered_down, decreasing = TRUE)
+	# ClusterProfiler formatted list, named with gene IDs,
+	# ranked by log2FC, does not contain duplicate gene ID.
+	# log2FC-numeric, ENTREZID-named, decreasing-sorted vector
+	
+	message("Executing GO enrichment for DE group | ", g, " | ...")
+	GO_UP <- do_GO_gsea(filtered_up, pvalueCutoff = 1, scoreType = "pos",
+				file_name = paste0(CachePath, g, "_GO_GSEA_Enrich_UPGene.csv"))
+	GO_DOWN <- do_GO_gsea(filtered_down, pvalueCutoff = 1, scoreType = "neg",
+				file_name = paste0(CachePath, g, "_GO_GSEA_Enrich_DOWNGene.csv"))
+	message("Executing KEGG enrichment for DE group | ", g, " | ...")
+	KEGG_UP <- do_KEGG_gsea(filtered_up, pvalueCutoff = 1, scoreType = "pos",
+				file_name = paste0(CachePath, g, "_KEGG_GSEA_Enrich_UPGene.csv"))	
+	KEGG_DOWN <- do_KEGG_gsea(filtered_down, pvalueCutoff = 1, scoreType = "neg",
+				file_name = paste0(CachePath, g, "_KEGG_GSEA_Enrich_DOWNGene.csv"))	
+	
+	data@deg[[g]]@deg_enrich$GO_UP <- GO_UP
+	data@deg[[g]]@deg_enrich$GO_DOWN <- GO_DOWN
+	data@deg[[g]]@deg_enrich$KEGG_UP <- KEGG_UP
+	data@deg[[g]]@deg_enrich$KEGG_DOWN <- KEGG_DOWN
+	
+}
+
+```
+
+### 富集分析表格 {.tabset .tabset-fade}
+
+用表格的形式展示每个集群中差异基因富集分析中最显著的前50个Pathway的结果。
+<br><dsrcp>`r if("富集分析表格" %in% names(dscrp_list)){dscrp_list["富集分析表格"]} `</dsrcp>
+
+```{r enrich-form, results='asis'}
+template <- "#### %s {.tabset .tabset-fade .tabset-pills .unlisted .unnumbered}
+"
+template_inside <- "##### %s {.unlisted .unnumbered}
+"
+
+for (g in names(data@deg)){
+	cat(sprintf(template, paste0(data@deg[[g]]@label_string)))
+	
+	cat(sprintf(template_inside, "KEGG_UP"))
+	if (nrow(data@deg[[g]]@deg_enrich$KEGG_UP) == 0){
+		cat("Not enough pathways significantly enriched.")
+	} else {
+		df <- as.data.frame(data@deg[[g]]@deg_enrich$KEGG_UP)[, c(1,2,5,6,8,11)]
+		if (nrow(data@deg[[g]]@deg_enrich$KEGG_UP) >= 50){df <- head(df, 50)}
+		print(kable(df, style = 'html', row.names = F, 
+				table.attr = "class=\'epars-tbl\'") %>% scroll_box(height = "450px"))
+	}
+	cat(space)
+	
+	cat(sprintf(template_inside, "KEGG_DOWN"))
+	if (nrow(data@deg[[g]]@deg_enrich$KEGG_DOWN) == 0){
+		cat("Not enough pathways significantly enriched.")
+	} else {
+		df <- as.data.frame(data@deg[[g]]@deg_enrich$KEGG_DOWN)[, c(1,2,5,6,8,11)]
+		if (nrow(data@deg[[g]]@deg_enrich$KEGG_DOWN) >= 50){df <- head(df, 50)}
+		print(kable(df, style = 'html', row.names = F, 
+				table.attr = "class=\'epars-tbl\'") %>% scroll_box(height = "450px"))
+	}
+	cat(space)	
+	
+	cat(sprintf(template_inside, "GO_UP"))
+	if (nrow(data@deg[[g]]@deg_enrich$GO_UP) == 0){
+		cat("Not enough pathways significantly enriched.")
+	} else {
+		df <- as.data.frame(data@deg[[g]]@deg_enrich$GO_UP)[, c(1,2,5,6,8,11)]
+		if (nrow(data@deg[[g]]@deg_enrich$GO_UP) >= 50){df <- head(df, 50)}
+		print(kable(df, style = 'html', row.names = F, 
+				table.attr = "class=\'epars-tbl\'") %>% scroll_box(height = "450px"))
+	}
+	cat(space)
+	
+	cat(sprintf(template_inside, "GO_DOWN"))
+	if (nrow(data@deg[[g]]@deg_enrich$GO_DOWN) == 0){
+		cat("Not enough pathways significantly enriched.")
+	} else {
+		df <- as.data.frame(data@deg[[g]]@deg_enrich$GO_DOWN)[, c(1,2,5,6,8,11)]
+		if (nrow(data@deg[[g]]@deg_enrich$GO_DOWN) >= 50){df <- head(df, 50)}
+		print(kable(df, style = 'html', row.names = F, 
+				table.attr = "class=\'epars-tbl\'") %>% scroll_box(height = "450px"))
+	}
+	cat(space)
+	# print(fancy_DT_table(head(as.data.frame(metadata(sce_filtered)$GSEA[[paste0("cluster_",
+	# 					per_cluster)]]$GO)), 10))
+	cat(space)
+	cat(space)
+}
+
+```
+### {.unlisted .unnumbered}
+<details>
+<summary>表中参数的相关诠释请点击下拉列表</summary>
+```{r enrich-result-difinition, results = 'asis'}
+metrics_summary_def <- read.xlsx(paste0(Resource_info_Path, "Permanent_Information/permanent_info.xlsx"), sheet = "gsea_table_summary")
+  cat("<br>")
+  print(kable(metrics_summary_def, format = 'html', row.names = F, table.attr = "class=\'epars-tbl\'"))
+
+cat("<br>")
+```
+
+
+
+### 富集分析气泡图 {.tabset .tabset-fade}
+
+差异基因富集分析的结果使用散点图(又称气泡图)展示如下，横轴代表富集系数，即富集到这个Pathway上的基因与富集分析基因总数目的百分比，越偏向右侧的分布说明富集程度越大。纵轴代表分组中差异表达基因富集到的Pathway名称，点的大小代表富集到此Pathway下的差异基因数目，点越大表示此Pathway差异基因越多。其渐变颜色表示富集信号通路的p值，越红表示p值越小，即富集越明显。根据用户提供的差异分析分组信息，又按上下调基因和GO与KEGG数据库组合排列分为四个子标签，每个标签页下展示最显著的前20个Pathway。
+<br><dsrcp>`r if("富集分析气泡图" %in% names(dscrp_list)){dscrp_list["富集分析气泡图"]} `</dsrcp>
+
+```{r enrich-bubble, results = 'asis', fig.width = 8, fig.height = 7}
+template <- "#### %s {.tabset .tabset-fade .tabset-pills .unlisted .unnumbered}
+"
+template_inside <- "##### %s {.unlisted .unnumbered}
+"
+for (g in names(data@deg)){
+	cat(sprintf(template, paste0(data@deg[[g]]@label_string)))
+	cat(sprintf("<details><summary>此差异分析比较的信息：</summary><div class=details_text> %s </details>", paste0(data@deg[[g]]@natural_annotation)))
+
+	cat(sprintf(template_inside, "KEGG_UP"))
+	p <- do_gsea_bubbleplot(data@deg[[g]]@deg_enrich$KEGG_UP)
+	subchunkify(p, fig_height = 7, fig_width = 8)
+	ggsave(paste0(PlotsPath, gsub(" ", "_", g),"KEGG_UP_Enrich_bubbleplot.pdf"), 
+											plot = p, width = 8, height = 7)
+	cat(space)
+	cat(sprintf(template_inside, "GO_UP"))
+	p <- do_gsea_bubbleplot(data@deg[[g]]@deg_enrich$GO_UP)
+	subchunkify(p, fig_height = 7, fig_width = 8)
+	ggsave(paste0(PlotsPath, gsub(" ", "_", g),"GO_UP_Enrich_bubbleplot.pdf"), 
+											plot = p, width = 8, height = 7)
+	cat(space)
+	cat(sprintf(template_inside, "KEGG_DOWN"))
+	p <- do_gsea_bubbleplot(data@deg[[g]]@deg_enrich$KEGG_DOWN)
+	subchunkify(p, fig_height = 7, fig_width = 8)
+	ggsave(paste0(PlotsPath, gsub(" ", "_", g),"KEGG_DOWN_Enrich_bubbleplot.pdf"), 
+											plot = p, width = 8, height = 7)
+	cat(space)
+	cat(sprintf(template_inside, "GO_DOWN"))
+	p <- do_gsea_bubbleplot(data@deg[[g]]@deg_enrich$GO_DOWN)
+	subchunkify(p, fig_height = 7, fig_width = 8)
+	ggsave(paste0(PlotsPath, gsub(" ", "_", g),"GO_DOWN_Enrich_bubbleplot.pdf"), 
+											plot = p, width = 8, height = 7)
+	cat(space)
+	cat(space)
+}
+
+```
+### {.unlisted .unnumbered}
+<br>
+
+### 富集分析网络图 {.tabset .tabset-fade}
+
+差异基因富集分析的结果使用网络图展示如下。富集分析中的网络图可以将关键基因和富集到的通路之间的联系以网络的形式展示。图中圆点展示的为富集通路或基因，均带有各自的标识。点的大小代表富集到此Pathway下的差异基因数目，点越大表示此Pathway差异基因越多。根据用户提供的差异分析分组信息，又按上下调基因和GO与KEGG数据库组合排列分为四个子标签，每个标签页下显示对应差异基因的富集网络图。
+<br><dsrcp>`r if("富集分析网络图" %in% names(dscrp_list)){dscrp_list["富集分析网络图"]} `</dsrcp>
+
+```{r enrich-network, results = 'asis', fig.width = 7, fig.height = 7}
+
+template <- "#### %s {.tabset .tabset-fade .tabset-pills .unlisted .unnumbered}
+"
+template_inside <- "##### %s {.unlisted .unnumbered}
+"
+for (g in names(data@deg)){
+	cat(sprintf(template, paste0(data@deg[[g]]@label_string)))
+	cat(sprintf("<details><summary>此差异分析比较的信息：</summary><div class=details_text> %s </details>", paste0(data@deg[[g]]@natural_annotation)))
+
+	cat(sprintf(template_inside, "KEGG_UP"))
+	p <- do_gsea_network(data@deg[[g]]@deg_enrich$KEGG_UP, showCategory = 5)
+	subchunkify(p, fig_height = 7, fig_width = 7)
+	ggsave(paste0(PlotsPath, gsub(" ", "_", g),"KEGG_UP_Enrich_concept_network.pdf"), 
+											plot = p, width = 7, height = 7)
+	cat(space)
+	cat(sprintf(template_inside, "GO_UP"))
+	p <- do_gsea_network(data@deg[[g]]@deg_enrich$GO_UP, showCategory = 3)
+	subchunkify(p, fig_height = 7, fig_width = 7)
+	ggsave(paste0(PlotsPath, gsub(" ", "_", g),"GO_UP_Enrich_concept_network.pdf"), 
+											plot = p, width = 7, height = 7)
+	cat(space)
+	cat(sprintf(template_inside, "KEGG_DOWN"))
+	p <- do_gsea_network(data@deg[[g]]@deg_enrich$KEGG_DOWN, showCategory = 5)
+	subchunkify(p, fig_height = 7, fig_width = 7)
+	ggsave(paste0(PlotsPath, gsub(" ", "_", g),"KEGG_DOWN_Enrich_concept_network.pdf"), 
+											plot = p, width = 7, height = 7)
+	cat(space)
+	cat(sprintf(template_inside, "GO_DOWN"))
+	p <- do_gsea_network(data@deg[[g]]@deg_enrich$GO_DOWN, showCategory = 3)
+	subchunkify(p, fig_height = 7, fig_width = 7)
+	ggsave(paste0(PlotsPath, gsub(" ", "_", g),"GO_DOWN_Enrich_concept_network.pdf"), 
+											plot = p, width = 7, height = 7)
+	cat(space)
+	cat(space)
+}
+
+```
+### {.unlisted .unnumbered}
+<br>
+
+# 高级分析
+
+## Signature 分析
+
+基因Signature是指科研或临床实验中发现的能代表细胞独特特征的单基因或多基因集合的表达模式，通常与细胞生理过程或细胞病变相关。研究中常使用基因Signatures来进行疾病分型、疗效预测或预后预测。本Panel中涉及的基因表达数据可分析的Signatures可分为两大类：
+<br>1. nCounter® PanCancer IO 360™ Panel 相关的Signatures，根据Panel包含的700+基因覆盖的关键通路，对肿瘤、肿瘤微环境和免疫反应相关的Signatures进行的整理。详情可参考NanoString nCounter PanCancer IO 360 [官方介绍页面](https://nanostring.com/products/ncounter-assays-panels/oncology/pancancer-io-360/)，合计共13个Signatures囊括40个核心通路，和54个特异性基因对应14种免疫细胞类型。下方呈现结果中此来源的Signature被归纳为一类，在同一标签页下展示。
+<details>
+<summary>IO 360 Panel中Signatures对应通路信息请点击下拉列表</summary>
+```{r, Signature_pathway_annotation, results = 'asis'}
+signature_file <- paste0(system.file("extdata", package = "EPARS"), "/","Signature_List.xlsx")
+signature_tbl <- read.xlsx(signature_file, sheet = "nCounter_Signature_Annotation")
+print(kable(signature_tbl, style = 'html', row.names = F, 
+			table.attr = "class=\'epars-tbl\'") %>% row_spec(0, bold = T, color = "white", background = "#4E84CC") %>% kable_material("striped") %>% scroll_box(height = "450px"))
+cat("<br>")  
+```
+</details>
+<br>2. 参考整合了NanoString的[Signature信息](https://nanostring.com/products/geomx-digital-spatial-profiler/geomx-rna-assays/geomx-cancer-transcriptome-atlas/)，整理得到了合计9大类共计111个肿瘤相关的基因通路和免疫细胞Signatures[@SpatialDecon]。
+
+
+<br>Signature分析的流程如下图所示：
+
+<center>![](`r paste0(Resource_info_Path, "Flowchart/nCounter_Signature.png") `){width=70%}</center>
+<div class="fig_caption">*上方包含的分析内容以合同约定为准，若不在合同范围内则不进行。*</div>
+
+<br>
+```{r signature-dir, results = 'hide'}
+CachePath <- sub('[/][^/]+$', '/5.Signature_Analysis/', gsub('[/]$', '', CachePath))
+PlotsPath <- sub('[/][^/]+$', '/5.Signature_Analysis/', gsub('[/]$', '', PlotsPath))
+create_dir(path.list = c(CachePath,PlotsPath))
+```
+Signature分析相关的数据图表将被保存至 **`r CachePath`**。
+
+
+```{r signature-analysis-background, results = 'hide', fig.width = 8}
+
+# obtain nCounter PanCancer IO 360 Panel Only
+data <- nCounter_Signature(data)
+
+# Pathway signature, curated
+data <- PathwaySignature(data)
+
+```
+
+### Signature 热图聚类 {.tabset .tabset-fade}
+
+对数据集覆盖到的不同的肿瘤通路类型进行聚类分析，观察样本中通路的表达相似性情况。根据用户提供的不同分组信息对聚类结果分别用热图展示[@gu2016complex]。其中数据均进行了归一化处理，让均值为0和标准差为1。将归一化的值在平均值±2倍标准偏差处进行截尾处理，以确保最大比例的数据的颜色分布正常（99% 的数据在平均值的 ± 2倍标准偏差内）。默认使用最小方差法ward.D2聚类方法构建距离矩阵，距离值越小则样本之间的相似度越大。本项目通路聚类分析结果如下，横轴代表每个样本，纵轴代表用户所选通路类型中的每个通路，示例注释列在热图的顶部，图例显示了样本分组信息，其通路几何平均表达值用渐变颜色表示，肿瘤Signature按行显示并列在热图的右侧。下方按标签页呈现了不同的通路下的Signature热图聚类结果。
+<br><dsrcp>`r if("Pathway Signature 热图聚类" %in% names(dscrp_list)){dscrp_list["Pathway Signature 热图聚类"]} `</dsrcp>
+
+```{r signature-heatmap, results = 'asis', fig.width = 8}
+# Plot signature heatmap
+template <- "#### %s {.unlisted .unnumbered}
+"
+signature = data@signature_list
+anno = data@plot_setting$heatmap_anno
+for (sig in names(signature)){
+  title = NULL
+  mtx <- htmp_scale(as.matrix(signature[[sig]]))
+  p <- plotImmuHeatmap(mtx,anno,title, scale = FALSE, 
+  					 htmp_color = data@config$heatmap_color)
+  
+  cat(sprintf(template, paste0(sig)))
+  subchunkify(p, fig_width = 10)
+  cat(space)
+  suppressMessages(save_pdf(p, paste0(PlotsPath, "signature_heatmap_", sig, ".pdf"), width = 10))
+}
+```
+### {.unlisted .unnumbered}
+<br>
+
+### Signature相关性分析 {.tabset .tabset-fade}
+
+<details>
+<summary>相关性分析介绍</summary>
+<div class=details_text>
+相关性分析，Correlation Analysis，是指对两个或多个具备相关性的变量元素进行分析，从而衡量两个变量因素的相关密切程度。相关性的元素之间需要存在一定的联系或者概率才可以进行相关性分析。
+<br>相关性分析中最常用的方法为使用皮尔森相关系数。皮尔森积矩相关系数(Pearson product-moment correlation coefficient，Pearson's r)用于度量两个变量X和Y之间的相关程度（线性相关），其值介于-1与1之间。该系数广泛用于度量两个变量之间的线性相关程度。
+计算x和y的相关性参数$r_{xy}$的方式如下：
+$$r_{xy} = \frac{cov(x,\ y)}{\sqrt{var(x)}\ *\ \sqrt{var(y)}}$$
+</details>
+针对用户选择的Panel中涉及的相关信号通路分别进行Signature相关性分析[@corrplot2021]。
+<br>下图呈现的是所有Signature间的相关性，横纵轴均代表每个Signature ，名称显示在顶部和左侧，渐变颜色显示样本间Pearson相关系数值，从[-1,1]以从红至蓝显示。每个标签页为名称对应的通路，通路下Signature的相关性图像在对应此标签页下呈现。按通路整理好的Signature相关性会较高。若一个通路中的某个Signature相关性与其他同通路的Signature相关性差距较大时，此Signature和通路的表达不符可能具有生物学意义，有深入探究其原因的可能性。
+<br><dsrcp>`r if("Signature相关性分析" %in% names(dscrp_list)){dscrp_list["Signature相关性分析"]} `</dsrcp>
+
+```{r signature-correlation, results = 'asis', fig.width = 7, fig.height = 6}
+template <- "#### %s {.unlisted .unnumbered}
+"
+
+for (sig in names(data@signature_list)){
+  cat(sprintf(template, paste0(sig)))
+  mtx <- cor(t((as.matrix(data@signature_list[[sig]]))))
+  
+  corrplot.mixed(mtx, lower = "circle", upper="circle", order="hclust",
+  hclust.method="ward.D2",tl.cex = 0.5, tl.pos = "lt", tl.col = desat("black"), 
+lower.col = colorRampPalette(desat(c("royalblue3", "grey97", "indianred3")))(10),
+upper.col = colorRampPalette(desat(c("royalblue3", "grey97", "indianred3")))(10))
+
+  cat(space)
+}
+```
+<!-- ### {.unlisted .unnumbered} -->
+<br>
+
+### Signature差异统计
+
+统计学检验可用于在选定组别中进行假设检验。对两组独立样本的比较通常使用Wilcoxon秩和检验（Wilcoxon rank sum test），对多组独立样本比较的秩和检验可用Kruskal-Wallis法。根据用户提供的分组信息和所选Panel分析得到的Signatures，对不同组别不同的Signature分值选用合适的统计学检验方法进行差异分析，并用箱线图展示对应的Signature差异显著性结果。如下图所示，不同类型的Signatures差异统计结果按标签页排列显示：
+
+```{r sig-DE-dir, results = 'hide'}
+CachePath <- sub('[/][^/]+$', '/7.Signature_Differential_Expression/', gsub('[/]$', '', CachePath))
+PlotsPath <- sub('[/][^/]+$', '/7.Signature_Differential_Expression/', gsub('[/]$', '', PlotsPath))
+create_dir(path.list = c(CachePath,PlotsPath))
+```
+Signature下的差异分析相关的数据图表将被保存至 **`r CachePath`**。
+<br><dsrcp>`r if("Signature差异统计" %in% names(dscrp_list)){dscrp_list["Signature差异统计"]} `</dsrcp>
+
+```{r signature-diff-boxplot, results = 'asis', fig.width= 16, fig.height = 16}
+template <- "##### %s {.unlisted .unnumbered}
+"
+title_template <- "#### 差异分组: %s {.tabset .tabset-fade}
+"
+for (g in names(data@deg)){
+	message("Plotting Signature diff boxplot for DE group -",g, "- ...")
+	cat(sprintf(title_template, paste0(data@deg[[g]]@label_string)))
+	
+	if (length(data@deg[[g]]@groupinfo) >= 2){
+	tmp_groupinfo_1 <- data@deg[[g]]@groupinfo[[2]]
+	tmp_groupinfo_2 <- data@deg[[g]]@groupinfo[[3]]
+} else{
+	tmp_groupinfo_1 <- unique(data@anno[[data@deg[[g]]@groupinfo[[1]]]])[1]
+	tmp_groupinfo_2 <- unique(data@anno[[data@deg[[g]]@groupinfo[[1]]]])[2]
+}
+	cat(sprintf("<details><summary>此差异分析比较的信息：</summary><div class=details_text> %s </details>",
+				paste0(sprintf("此差异分析研究的是各类通路中 %s 和 %s 两个分组间的Signature差异表达。使用Wilcox秩和检验来检查分组间的每个Signature上是否有显著性差异。p-value < 0.05 作为检验显著性的数值标准。", paste0(tmp_groupinfo_1),  paste0(tmp_groupinfo_2)))))
+	
+	# cat(data@deg[[g]]@natural_annotation)
+	cat(space)
+	for (c in names(data@signature_list)){
+		tmp_list = list()
+		tmp_df <- NULL
+		tmp_df = cbind(t(data@signature_list[[c]]),data.frame(data@anno))
+		tmp_df_filtered <- subset(tmp_df, rownames(tmp_df)
+				   %in% data@deg[[g]]@filtered_sample)
+		tmp_sig = rownames(data@signature_list[[c]])
+		for (i in tmp_sig){
+		  tmp_list[[i]] <- sig_diff_boxplot(tmp_df_filtered,data@deg[[g]]@groupinfo[[1]],i)
+		}
+		ncol = 6
+		nrow = ceiling(length(tmp_sig)/ncol)
+		cat(sprintf(template, paste0(c)))
+		
+		suppressMessages(png(paste0(PlotsPath, "signature_diff_boxplot_", g,
+				   "_", gsub(" ", "_", c),".png"), width = ncol*200, 
+													height = nrow*380))
+		suppressMessages(print(ggarrange(plotlist = tmp_list,nrow = nrow, ncol = ncol) +
+				coord_fixed(ratio = 1.8* nrow/ncol)))
+		dev.off()
+		cat("<img src=",paste0(PlotsPath, "signature_diff_boxplot_", g,
+				   "_", gsub(" ", "_", c),".png")," width='100%' align = center />")
+		cat(space)
+	}
+	cat(paste0("#### {.unlisted .unnumbered}"))
+	cat(space)
+}
+```
+<br>
+
+### 免疫细胞分型
+
+通过nCounter® PanCancer IO 360™ Panel中人工筛选出的细胞(特别是免疫细胞)的特征基因序列，将每个样本中的特征基因表达和对应的细胞的丰度关联，从而对每个样本中免疫细胞的丰度的差异进行分析。
+
+```{r Immune-celltype-dir, results = 'hide'}
+CachePath <- sub('[/][^/]+$', '/6.Immune_Celltype/', gsub('[/]$', '', CachePath))
+PlotsPath <- sub('[/][^/]+$', '/6.Immune_Celltype/', gsub('[/]$', '', PlotsPath))
+create_dir(path.list = c(CachePath,PlotsPath))
+```
+免疫细胞分型相关的数据图表将被保存至 **`r CachePath`**。
+
+#### 免疫细胞丰度热图
+
+通过各样本中相关基因对应的各细胞类型组分进行富集分析和聚类，可比较各样本间不同免疫细胞类型含量丰度的差异。不同的细胞类型在每一个样本中的分布情况如下方热图中呈现，可对样本之间表达的细胞类型组分相似程度进行推断。其中数据均进行了归一化处理，让均值为0和标准差为1。将归一化的值在平均值 ± 2倍标准偏差处进行截尾处理，以确保最大比例的数据的颜色分布正常（99% 的数据在平均值的 ± 2倍标准偏差内）。默认使用最小方差法ward.D2聚类方法构建距离矩阵，距离值越小则样本之间的相似度越大。其横轴代表每个样本，纵轴代表各个细胞类型，示例注释列在热图的顶部，图例显示了样本分组信息。
+<br><dsrcp>`r if("免疫细胞丰度热图" %in% names(dscrp_list)){dscrp_list["免疫细胞丰度热图"]} `</dsrcp>
+
+```{r cell-type-heatmap, results = 'asis', fig.width = 12, fig.height = 7}
+Immune_celltype <- data.frame(row.names = colnames(data@exp))
+# 从储存的信息中调取细胞类型对应的marker队列，放置在celltype_list中
+celltype_file <- paste0(system.file("extdata", package = "EPARS"), "/","Signature_List.xlsx")
+tbl <- read.xlsx(celltype_file, sheet = "nCounter_CellType")
+colnames(tbl) <- NULL
+celltype_list <- sapply(tbl[,1],function(x) NULL)
+for (i in 1:nrow(tbl)){
+  celltype_list[[i]] <- append(celltype_list[[i]], tbl[i,-1][!is.na(tbl[i,-1])])
+  }
+# 根据对应marker计算样本的细胞类型表达
+for (i in names(celltype_list)){
+	dataset_i <- as.matrix((as.data.frame(t(data@exp)))[, colnames((as.data.frame(t(data@exp)))) %in% celltype_list[[i]],drop = F])
+	if (ncol(dataset_i) == 1){Immune_celltype[[i]] <- log2(dataset_i)}
+	if (ncol(dataset_i) >= 2){Immune_celltype[[i]] <- rowSums(log2(dataset_i))/ncol(dataset_i)}
+}
+
+write.table(Immune_celltype, file = paste0(CachePath, "TME_celltype.csv"), sep = ",", row.names = T, col.names = NA)
+data@Immune_celltype_df <- Immune_celltype
+dt_boxplot <- as.data.frame(t(log2(data@exp)))
+for (g in colnames(data@anno)){
+	dt_boxplot[[g]] <- data@anno[[g]]
+}
+dt_boxplot[["Sample"]] <- rownames(dt_boxplot)
+dt_boxplot <- melt(dt_boxplot, id.vars=c("Sample", colnames(data@anno)), 
+           variable.name="Gene", value.name = "log2 Expression")
+
+  p <- plotImmuHeatmap(mat = htmp_scale(as.matrix(t(Immune_celltype))),
+						anno = data@plot_setting$heatmap_anno,
+						title = NULL, scale = FALSE, 
+						htmp_color = data@config$heatmap_color)
+  subchunkify(p, fig_width = 12)
+  suppressMessages(save_pdf(p, paste0(PlotsPath, "Immune_Celltype_Heatmap.pdf"), width = 12))
+
+```
+
+#### 免疫细胞丰度箱线图 {.tabset .tabset-fade}
+
+在特征基因序列标注细胞类型后，基于差异分析的分组及样本筛选信息，不同差异分析分组下细胞类型分布的统计学差异通过如下箱线图呈现。纵轴代表细胞丰度表达的log2对数值，横轴为对照分组，图例显示分组详细信息，每个箱线图对应的细胞类型在箱线图顶部作为小标题呈现。根据用户提供的差异分析分组信息，每个标签页包含一个差异分析分组及样本筛选信息下所有被标注出的免疫微环境细胞类型。
+<br><dsrcp>`r if("免疫细胞丰度箱线图" %in% names(dscrp_list)){dscrp_list["免疫细胞丰度箱线图"]} `</dsrcp>
+
+```{r cell-type-boxplot, results = 'asis', fig.width = 10, fig.height = 10}
+template <- "##### %s {.unlisted .unnumbered}
+"
+
+# section to format dt_boxplot, the dataframe need to be input into boxplot function
+dt_boxplot <- data@Immune_celltype_df
+for (g in colnames(data@anno)){
+	dt_boxplot[[g]] <- data@anno[[g]]
+}
+dt_boxplot[["Sample"]] <- rownames(dt_boxplot)
+dt_boxplot <- melt(dt_boxplot, id.vars=c("Sample", colnames(data@anno)), 
+           variable.name="CellType", value.name = "log2_Expression")
+
+for (g in names(data@deg)){
+	cat(sprintf(template, paste0(data@deg[[g]]@label_string)))
+	cat(sprintf("<details><summary>此差异分析比较的信息：</summary><div class=details_text> %s </details>", paste0(data@deg[[g]]@natural_annotation)))
+	# cat(data@deg[[g]]@natural_annotation)
+	dt_boxplot_filtered <- subset(dt_boxplot, dt_boxplot$Sample
+				   %in% data@deg[[g]]@filtered_sample)
+	
+	col_number <- data@config$boxplot_ncol
+	row_number <- ceiling(ncol(data@Immune_celltype_df)/col_number)
+	
+	p <- protein_diff_boxplot(df = dt_boxplot_filtered, 
+						 compared_anno =  gsub("\\,.*", "", gsub("\\(.*", "", g)),
+						 title = "Cell type labeled log2 Gene Expression among ")
+	subchunkify(p, fig_width = 2*col_number, fig_height = 4*row_number)
+	cat(space)
+	ggsave(paste0(PlotsPath,"Immune_CellType_DE_boxplot_", g, ".pdf"), plot = p, width = 2*col_number, height = 4*row_number)
+	
+}
+
+```
+#### {.unlisted .unnumbered}
+<br>
+
+#### 免疫细胞差异表达森林图 {.tabset .tabset-fade}
+
+森林图显示了不同分组下免疫细胞类型差异表达的均值和95%置信区间。纵轴代表无效线，每一条平行于横轴的线段代表一个细胞类型，线段的长度代表95%置信区间。图例显示分组详细信息。当森林图中的横线线段与无效线相交时，提示两组之间结局事件发生率的差异无统计学显著性，不能认为因素A、B对结局事件发生风险的影响作用不同。
+<br><dsrcp>`r if("免疫细胞差异森林图" %in% names(dscrp_list)){dscrp_list["免疫细胞差异森林图"]} `</dsrcp>
+```{r cell-type-forestplot, results = 'asis', fig.width = 10, fig.height = 10}
+template <- "##### %s {.unlisted .unnumbered}
+"
+cat(space)
+Immune_celltype <- data.frame(row.names = colnames(data@exp))
+# 从储存的信息中调取细胞类型对应的marker队列，放置在celltype_list中
+celltype_file <- paste0(system.file("extdata", package = "EPARS"), "/","Signature_List.xlsx")
+tbl <- read.xlsx(celltype_file, sheet = "nCounter_CellType")
+colnames(tbl) <- NULL
+celltype_list <- sapply(tbl[,1],function(x) NULL)
+for (i in 1:nrow(tbl)){
+  celltype_list[[i]] <- append(celltype_list[[i]], tbl[i,-1][!is.na(tbl[i,-1])])
+}
+# 根据对应marker计算样本的细胞类型表达
+for (i in names(celltype_list)){
+  dataset_i <- as.matrix((as.data.frame(t(data@exp)))[, colnames((as.data.frame(t(data@exp)))) %in% celltype_list[[i]],drop = F])
+  if (ncol(dataset_i) == 1){Immune_celltype[[i]] <- log2(dataset_i)}
+  if (ncol(dataset_i) >= 2){Immune_celltype[[i]] <- rowSums(log2(dataset_i))/ncol(dataset_i)}
+}
+#write.table(Immune_celltype, file = paste0(CachePath, "TME_celltype.csv"), sep = ",", row.names = T, col.names = NA)
+for (i in data@heatmap_groups) {
+  if(length(unique(data@anno[[i]])) == 2){
+    Immune_celltype_df_ann = cbind(Immune_celltype,ann = data@anno[[i]])
+    var1 = data.frame(unique(Immune_celltype_df_ann$ann))[1,]#unique(Immune_celltype_df_ann$ann)  提取变量种类,
+    var2 = data.frame(unique(Immune_celltype_df_ann$ann))[2,] 
+    var1_data <- subset(Immune_celltype_df_ann,ann == var1)#提取变量1(var1)组变量2(var2)组
+    var1_data$ann = NULL#删除注释列。
+    var2_data <- subset(Immune_celltype_df_ann,ann == var2)
+    var2_data$ann = NULL
+    mean_var2_data <- data.frame(colMeans(var2_data))#SD组求平均
+    var1_data <- t(var1_data)#转置，配合mean_sd_data数据格式。
+    dat_logFC <- var1_data-mean_var2_data[,1]#var1组减去var2组的均值，因为这里的var1和var2都是经过log2之后的数值，因此，log2（var1/var2_mean）等同于
+    #log2var1-log2var2，mean_var2_data[,1]为第一列，**应该可以改个写法。**
+    dat_logFC <- apply(dat_logFC,1,t.test)#对结果进行t检验
+    #dat_test <- dat_unand#连接俩模块，**后面再改**
+    mean <- lapply(dat_logFC,\(x){x[["estimate"]]})%>%unlist%>% data.frame()#提取均值
+    lcl95 <- lapply(dat_logFC,\(x){x[["conf.int"]][[1]]})%>%unlist%>% as.data.frame()#提取95%置信区间的下限
+    ucl95 <- lapply(dat_logFC,\(x){x[["conf.int"]][[2]]})%>%unlist%>% as.data.frame()#提取95%置信区间的上限
+    p_value <- lapply(dat_logFC,\(x){x[["p.value"]]})%>%unlist%>% as.data.frame()#提取p值，但是在后面的图里没有展示
+    merge_data <- cbind(mean$.,lcl95,ucl95,p_value)#合并，mean$. 是因为如果直接使用mean行名会变得复杂，好像只有mean这个元素的行名与其他不同。
+    merge_data <- cbind(row.names(merge_data),merge_data)#删除行名，把行名当做列
+    row.names(merge_data) <- NULL
+    colnames(merge_data) <- c("name","logFC","lcl95","ucl95","p_value") #重命名列名。 这里的logFC 就是logFC的均值。
+    #绘制森林图
+    forest_data <- merge_data %>%   #提取数据列
+      transmute(
+        name,
+        mean = logFC,
+        upper = ucl95,
+        lower = lcl95
+      )
+    group <- ifelse(
+      forest_data$lower > 0, "up",
+      ifelse(
+        forest_data$upper < 0, "down",
+        "not"
+      )
+      
+    ) 
+    forest_data <- data.frame(forest_data,Significance=group) #合并
+    
+    #绘制森林图
+    cols <- c( "down" = "black", "not" = "white","up" = "black")
+    sp <- c("down" = 25, "not" = 21,"up" = 24)
+    p <- ggplot(forest_data, aes(mean, 
+                                 y = reorder(name,mean),
+                                 #col=Significance,
+                                 shape = Significance,
+                                 fill = Significance
+    )
+    ) # 不同形状shape= Factor
+    forest_groupinfo <- paste0("Down from ",var1,"/",var2," <--- Log2 FC ---> " ,"Up from ",var1,"/",var2)
+cat(sprintf(template, paste0(i)))
+cat(space)
+cat(sprintf("<details><summary>此森林图比较的信息：</summary><div class=details_text> %s </details>",paste0("此森林图表示的是从 **",i,"**的数值中分析**",var1,"**和**",var2,"**两个组别的样本 之间的差异表达。如果一种免疫细胞的丰度**上调(UP)**，代表着 **",var1,"** 的样本中此种免疫细胞的丰度相对 **",var2,"** 的样本**增高**，相反**下调(DOWN)**代表 **",var1,"** 的样本中此种免疫细胞的丰度相对 **",var2,"** 的样本丰度**降低**。" )))
+    subchunkify(p + 
+      geom_errorbarh(aes(xmax =upper, xmin = lower), 
+                     height = 0.4,
+                     colour="#4E84CC",
+                     size = 1.2
+      ) +
+      geom_point(size=2,
+                 color = "#4E84CC", 
+                 stroke = 1.5
+                 )+
+      geom_vline(aes(xintercept = 0),
+                 linetype = "dashed",
+                 size = 1.2
+                 ) +
+      xlab(forest_groupinfo) + 
+      ylab(' ')+
+      #scale_colour_manual(values = cols)+
+      scale_shape_manual(values = sp)+
+      scale_fill_manual(values = cols)+
+      #scale_fill_discrete(guide = "none")
+      #theme(legend.position = 'none')
+      ggtitle(paste0("Results for ",i),paste0("(",var1,") versus Baseline (",var2,")"))+
+      theme(legend.position="bottom",#左边left,右边 right, 底部bottom
+            panel.border = element_rect(linetype = "solid", fill = NA),#设置边框线式样
+            panel.background = element_blank(),#去掉背景的灰底
+            legend.key  = element_blank(),#去掉图例的灰底
+            #panel.grid.major.y= element_line(size = 3,color = "grey"),
+            #panel.grid.minor.y= element_blank(),
+            panel.grid.major.x=element_blank(),
+            panel.grid.minor.x=element_blank(),
+            plot.title = element_text(hjust = 0.5),
+            plot.subtitle = element_text(hjust = 0.5)
+      )
+      )
+    ggsave(paste0(PlotsPath,"Immune_CellType_DE_foresetplot_",i, ".pdf"))
+    write.csv(merge_data,file =(paste0(PlotsPath,"Immune_CellType_DE_foresetplot_data_",i,".csv")),row.names = F)
+  }
+  cat(space)
+}
+```
+#### {.unlisted .unnumbered}
+
+<br>
+
+### TIS分析
+
+基因表达谱 (Gene Expression Profile, GEP)是多个基因表达水平的集合。对某一特定状态下细胞/组织的基因表达谱的聚焦可以深入了解该细胞/组织在此状态下的细胞功能和细胞对此特定状态的反应。
+<br>2017年Ayers等人的团队在对帕博利珠单抗(Pembrolizumab)治疗患者的研究中对实体瘤全表达谱数据的逐步发现、筛选和验证过程中，发现一组干扰素-γ应答基因与抗原呈递、趋化因子表达、细胞毒活性和适应性免疫抗性等细胞功能相关[@ayers2017ifn]。Ayers团队根据此发现并整理出炎性基因的T细胞炎性表达谱(T cell-inflamed Gene Expression Profile)。
+<br>2018年Cristescu等人的团队研究发现同样接受帕博利珠单抗(Pembrolizumab)治疗患者中TMB和T细胞炎性表达谱双高表达的分组单抗治疗的PFS显著优于低表达分组[@cristescu2018pan]。提示TMB和T细胞炎性表达谱有联合预测疗效的能力。
+<br>在上述研究发现验证后，研究人员整理出了包含18个基因的Tumor Inflammation Signature (TIS)。该Signature基于上述研究成果，对临床研究中免疫检查点抑制剂治疗的疗效优势基因进行富集。此Signature被认为是有潜力的免疫检查点抑制剂治疗疗效预测手段。
+<br>裕策生物获得Nanostring开发的TIS指标授权分析软件的正版授权，在下方的分析模块对表达谱中TIS包含的18个基因进行聚焦分析。
+
+```{r TIS-dir, results = 'hide'}
+CachePath <- sub('[/][^/]+$', '/7.Tumor_Inflammation_Signature/', gsub('[/]$', '', CachePath))
+PlotsPath <- sub('[/][^/]+$', '/7.Tumor_Inflammation_Signature/', gsub('[/]$', '', PlotsPath))
+create_dir(path.list = c(CachePath,PlotsPath))
+```
+TIS分析相关的数据图表将被保存至 **`r CachePath`**。
+
+```{r TIS-background, results = 'hide'}
+# use raw unfiltered exp mtx for TIS calculation, in orer to perserve HK gene exps
+TIS_mtx <- data@unfiltered_exp[, colnames(data@unfiltered_exp) %in% colnames(data@exp)]
+# TIS algorithm calculation
+TIS_result <- TIS_algorithm(TIS_mtx)
+
+data@tis_result[["tis_gene"]] <- TIS_result[[2]]
+data@tis_result[["tis_score"]] <- TIS_result[[1]]
+# adding TIS score information back into object annotation
+data@anno <- cbind(data@anno, "TIS_Status" = (data@tis_result$tis_score[,"TIS_Status"]))
+# object@anno <- merge(object@anno, as.data.frame(object@tis_result$tis_score),
+#                      by = 0)
+# object@anno <- dplyr::select(object@anno, -c("TIS_GEP", "Row.names"))
+# append TIS_Status into plotting groups
+data@heatmap_groups <- append(data@heatmap_groups, "TIS_Status")
+data <- epars_plot_setting(data)
+data <- epars_heatmap_anno_data(data)
+
+
+
+write.table(data@tis_result$tis_gene,
+			paste0(CachePath,"TIS_GEP.csv"), 
+			sep = ",", row.names = T, col.names = NA)
+write.table(data@tis_result$tis_score,
+			paste0(CachePath,"TIS_Score.csv"), 
+			sep = ",", row.names = T, col.names = NA)
+```
+
+#### TIS评分表格
+
+本项目中所有样本T细胞炎性表达谱中基因的表达会进行进一步计算。在经过参照管家基因表达的背景校正后，TIS中的18个基因的归一化后的表达水平会分别按照不同的权重，加权计算得到样本对应的T细胞炎性综合评分，并按照预设的炎性评分阈值对样本的TIS表达水平进行高或低的归类。
+下方用表格的形式展示了每个样本的TIS评分和TIS表达水平的高或低。
+<br><dsrcp>`r if("TIS评分表格" %in% names(dscrp_list)){dscrp_list["TIS评分表格"]} `</dsrcp>
+
+```{r TIS-score-table, results = 'asis', fig.width = 6, fig.height = 6}
+cat("<br>")
+TIS_score_df <- as.data.frame(data@tis_result$tis_score)
+TIS_score_df$TIS_GEP <- as.numeric(formatC(as.numeric(TIS_score_df$TIS_GEP), digits = 4, format = "f"))
+TIS_score_df <- TIS_score_df[order(TIS_score_df$TIS_GEP, decreasing = T), ]
+print(kbl(TIS_score_df, style = 'html', row.names = T, 
+			table.attr = "class=\'epars-tbl\'") %>% row_spec(0, bold = T, color = "white", background = "#4E84CC") %>% kable_material("striped") %>% scroll_box(height = "450px"))
+cat("<br>")  
+```
+<br>
+
+#### TIS基因热图
+
+对TIS包含的18个基因进行聚类分析，热图[@gu2016complex]展示结果如下，其中数据均进行了归一化处理，让均值为0和标准差为1。将归一化的值在平均值±2倍标准偏差处进行截尾处理，以确保最大比例的数据的颜色分布正常（99% 的数据在平均值的 ± 2倍标准偏差内）。默认使用最小方差法ward.D2聚类方法构建距离矩阵，距离值越小则样本之间的相似度越大。横轴代表每个样本，纵轴代表TIS中的每个基因，示例注释列在热图的顶部，图例显示了样本分组信息，其基因表达值用渐变颜色表示，基因名按行显示并列在热图的右侧。
+<br><dsrcp>`r if("TIS基因热图" %in% names(dscrp_list)){dscrp_list["TIS基因热图"]} `</dsrcp>
+
+```{r TIS-gene-heatmap, results = 'asis', fig.width = 10}
+TIS_gene_mtx <- data@tis_result$tis_gene
+if(ncol(TIS_gene_mtx) > 50){show_column_names = F} else {show_column_names = T}
+p <- plot_Heatmap(mat = TIS_gene_mtx, row_font_size = 7, 
+				  show_column_names = show_column_names,
+				  anno = data@plot_setting$heatmap_anno,
+				  scale = TRUE, cluster_rows = F, show_row_names = T,
+				  htmp_color = data@config$heatmap_color)
+subchunkify(p, fig_width = 10)
+suppressMessages(save_pdf(p, paste0(PlotsPath, "TIS_GEP_heatmap.pdf"), width = 10))
+```
+<br>
+
+# 参考来源
+<br>
+<div id="refs"></div>
+<br><br>
+
+<hr />
+
+# 重要声明
+
+<div class="disclaimer">
+1.本检测分析报告仅对本次样品有效，不可作为临床诊断或治疗的依据。
+<br>2.如对本检测分析报告存疑，请在报告交付后1个月内与我们联系。
+<br>3.裕策生物对本检测分析报告保留最终解释权。
+<br>4.裕策生物对本检测分析报告保密，仅合同签署方享有相关数据、分析内容。
+</div>
+<div class="signature">
+<br>
+<br>实验操作 &emsp;
+<img src= `r paste0("resource/", sig_operator, ".png") ` style = "clear: right; BORDER-BOTTOM: solid 2px black;">
+<br>数据分析 &emsp;
+<img src= `r paste0("resource/", sig_analyst, ".png") ` style = "clear: right; BORDER-BOTTOM: solid 2px black;">
+<br>报告核对 &emsp;
+<img src= `r paste0("resource/", sig_reviewer, ".png") ` style = "clear: right; BORDER-BOTTOM: solid 2px black;">
+<br>报告审批 &emsp;
+<img src= `r paste0("resource/", sig_approver, ".png") ` style = "clear: right; BORDER-BOTTOM: solid 2px black;">
+<br><br>日&emsp;&emsp;期&emsp;&emsp;<date_sig style="font-size: large; BORDER-BOTTOM: solid 2px black;">`r paste0(format(Sys.time(), '%Y/%m/%d'))`</date_sig>
+
+</div>
+<hr />
+
+<div class="container">
+  <img class="cover_img" src= `r paste0("resource/", vi_report_back) `>
+  <div class="back_info">`r vi_company_long `<br>
+						 `r vi_back `<br>
+						 网址：[www.yucebio.com](www.yucebio.com)</div>
+</div>
+
+<div class="tocify-extend-page" data-unique="tocify-extend-page" style="height: 0;"></div>
