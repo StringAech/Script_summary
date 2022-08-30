@@ -247,5 +247,6 @@ CIBERSORT <- function(sig_matrix, mixture_file, perm=0, QN=TRUE, absolute=FALSE,
 P_value_filtration <- function(a,pvalue_filtration){
   if(pvalue_filtration==TRUE){a <- a[a$P.value<0.05,]}
   if(pvalue_filtration==FALSE){a <- a}
+  a <- select(a,-c(P.value,Correlation,RMSE))
   return(a)
 }

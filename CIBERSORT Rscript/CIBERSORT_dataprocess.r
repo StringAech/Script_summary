@@ -11,10 +11,12 @@ pkgs <- c("e1071",
           "ggthemes",
           "dplyr",
           "tidyr","reshape2",
-          "RColorBrewer")
+          "RColorBrewer",
+          "pacman")
 lapply(pkgs, library, character.only = T)
 source("E:/yuceguohao/code/CIBERSORT Rscript/CIBERSORT.R")#load Rscript and Custom Functions.
 getwd()
+library(pacman)
 #CIBERSORT DATA 
 results=CIBERSORT("LM22.csv", "YTP0006_28case_log2exp.csv", 
                   perm=100, 
@@ -66,25 +68,41 @@ ggbarplot(
       angle = 90,
       hjust = 1,
       vjust = 1,
-      size = 1
+      size = 10
     ),
     legend.position = "right"
   )
 +scale_fill_manual(values = colors)
 #对cibersort结果 分组注释 并进行可视化
-data <- read.csv("YTP0006_28case_log2exp_CIBERSORT.csv",header = T,sep = ",",)
-data <- P_value_filtration(a,pvalue_filtration = F)
+raw_data <- read.csv("YTP0006_28case_log2exp_CIBERSORT.csv",header = T,sep = ",")
+data <- data_filtration(raw_data,pvalue_filtration = T)
 dt_boxplot <- melt(data, id.vars=c("X","group" ), 
                    variable.name="CellType", value.name = "log2_Expression")
 p <- ggplot(dt_boxplot,aes(x = CellType,
                            y=log2_Expression,
-                           fill = group)) + 
-  geom_boxplot(position = 'dodge',width = 0.5) +
-  labs(fill = "CellType",x = "",y = "Infiltration") + 
-  # ylim(0,max(dt_boxplot$log2_Expression) + 4.5) +
-  theme_bw() +
-  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1,color = "black"),
-        axis.ticks.x = element_blank(),legend.title= element_blank(),
-        legend.position = "bottom")
+                           fill = group))+ 
+  geom_boxplot(position = 'dodge',)+
+  labs(fill = "CellType",x = "",y = "Cell proportion")+ 
+  theme_bw()+
+  theme(
+    axis.text.x = element_text(
+      angle = 45,
+      hjust = 1,
+      vjust = 1,
+      color = "black",
+      family="sans"
+    ),
+    legend.position = "right"
+  )+
+  stat_compare_means(label = "p.signif",
+                     #angle = 90,
+                     label.y = 0.5,
+                     hide.ns = T,
+                     color = "red",
+                     size = 10)
+  #facet_wrap(~CellType)
+  # theme(axis.text.x = element_text(angle = 45, vjust = 10, hjust = 10,color = "black"),
+  #       axis.ticks.x = element_blank(),legend.title= element_blank(),
+  #       legend.position = "bottom")
 p
-ggsave(filename = "./CIBERSORT_group_boxplot.pdf",plot = p, width = 8, height = 7)
+ggsave(filename = "./CIBERSORT_group(imm)_boxplot_filtration-2.pdf",plot = p, width = 8, height = 7)
