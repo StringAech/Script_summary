@@ -19,10 +19,12 @@ npx_readin <- function(path=NPX.path,wide=TRUE){
 ## wide:: results file format is long or wide
   ### long: wide=F
   ### wide: wide=T(default)
-  if(wide){NPX <- read.xlsx(NPX.path) %>% .[(which(.[,1]=="OlinkID")+1):(which(.[,1]=="LOD")-1),]}else{NPX <- read.xlsx(NPX.path)}
+  if(wide){NPX <- read.xlsx(NPX.path) %>% .[(which(.[,1]=="OlinkID")+1):(which(.[,1]=="LOD")-1),]}else{NPX <- read.xlsx(NPX.path,
+                                                                                                                        skipEmptyRows = F,
+                                                                                                                        colNames = F)}
 }
-sample.table.path <- "./20230601-YuKM-R-20-001 1.0 Olink Signature Q100 血浆血清样本 Target 96多重蛋白组学检测实验记录 - CDM205.xlsx"
-NPX.path <- "./微芯单独样本_NPX.xlsx"
+sample.table.path <- "./results/20230601-YuKM-R-20-001 1.0 Olink Signature Q100 血浆血清样本 Target 96多重蛋白组学检测实验记录-SZYC202212-T01170045.xlsx"
+NPX.path <- "../NPX_results/SZYC202212_T01170045_上海浦东医院_NPX.xlsx"
 sample.table <- read.xlsx(sample.table.path,
                           sheet = "Sheet2",
                           rowNames = T
@@ -47,6 +49,7 @@ sample.hole$sample <- gsub(sample.hole[,2],replacement = "",pattern = " ")#去�
 NPX <- npx_readin(path = NPX.path,wide = F)
 
 NPX[[1]] <- stri_replace_all_regex(NPX[[1]],replacement = sample.hole$sample,sample.hole$holenum,vectorize_all = F)
-write.xlsx(NPX,file = paste0(dirname(NPX.path),"/results/sampleid_",basename(NPX.path)))
+write.xlsx(NPX,
+           file = paste0(dirname(NPX.path),"/2sampleid_",basename(NPX.path)),
+           colNames = F)
 rm(list = ls())
-
