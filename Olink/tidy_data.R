@@ -49,6 +49,7 @@ sample.hole$sample <- gsub(sample.hole[,2],replacement = "",pattern = " ")#去�
 NPX <- npx_readin(path = NPX.path,wide = F)
 
 NPX[[1]] <- stri_replace_all_regex(NPX[[1]],replacement = sample.hole$sample,sample.hole$holenum,vectorize_all = F)
+#replacement = *** 被替换的向量
 write.xlsx(NPX,
            file = paste0(dirname(NPX.path),"/2sampleid_",basename(NPX.path)),
            colNames = F)
