@@ -1,0 +1,22 @@
+---
+title: "qmd_script_presentation"
+author: "Guo Hao"
+format: 
+  html:
+    code-fold: True
+editor: visual
+---
+
+# dplyr package presentation
+
+## 多行并一行
+
+```{r, warning=FALSE, message=FALSE}
+library(dplyr)
+library(openxlsx)
+expr <- read.xlsx("./工作簿1.xlsx")
+expr
+expr %>% 
+  group_by(id) %>% 
+  summarise(across(everything(), \(.x) paste(.x, collapse = ";")))
+```
