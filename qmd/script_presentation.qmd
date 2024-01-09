@@ -15,8 +15,19 @@ editor: visual
 library(dplyr)
 library(openxlsx)
 expr <- read.xlsx("./工作簿1.xlsx")
-expr
+head(expr)
 expr %>% 
   group_by(id) %>% 
   summarise(across(everything(), \(.x) paste(.x, collapse = ";")))
+```
+
+```{r}
+# 另一种方法
+expr %>% split(f = expr$id) %>% 
+  lapply(\(.x){
+   id = unique(.x[[1]])
+   items = .x %>% dplyr::pull(items) %>% paste(collapse = ";")
+   data <- data.frame(id = id, items = items)
+   return(data)
+  }) %>% do.call(rbind, .)
 ```

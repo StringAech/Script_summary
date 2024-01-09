@@ -111,7 +111,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <div class="sourceCode cell-code" id="cb1"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="fu">library</span>(dplyr)</span>
 <span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a><span class="fu">library</span>(openxlsx)</span>
 <span id="cb1-3"><a href="#cb1-3" aria-hidden="true" tabindex="-1"></a>expr <span class="ot">&lt;-</span> <span class="fu">read.xlsx</span>(<span class="st">"./工作簿1.xlsx"</span>)</span>
-<span id="cb1-4"><a href="#cb1-4" aria-hidden="true" tabindex="-1"></a>expr</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<span id="cb1-4"><a href="#cb1-4" aria-hidden="true" tabindex="-1"></a><span class="fu">head</span>(expr)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
 </details>
 <div class="cell-output cell-output-stdout">
 <pre><code>  id items
@@ -120,10 +120,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 3  1     C
 4  2     D
 5  2     E
-6  2     F
-7  3     G
-8  3     H
-9  3     K</code></pre>
+6  2     F</code></pre>
 </div>
 <details>
 <summary>Code</summary>
@@ -138,6 +135,25 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 1     1 A;B;C
 2     2 D;E;F
 3     3 G;H;K</code></pre>
+</div>
+</div>
+<div class="cell">
+<details>
+<summary>Code</summary>
+<div class="sourceCode cell-code" id="cb5"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a><span class="co"># 另一种方法</span></span>
+<span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a>expr <span class="sc">%&gt;%</span> <span class="fu">split</span>(<span class="at">f =</span> expr<span class="sc">$</span>id) <span class="sc">%&gt;%</span> </span>
+<span id="cb5-3"><a href="#cb5-3" aria-hidden="true" tabindex="-1"></a>  <span class="fu">lapply</span>(\(.x){</span>
+<span id="cb5-4"><a href="#cb5-4" aria-hidden="true" tabindex="-1"></a>   id <span class="ot">=</span> <span class="fu">unique</span>(.x[[<span class="dv">1</span>]])</span>
+<span id="cb5-5"><a href="#cb5-5" aria-hidden="true" tabindex="-1"></a>   items <span class="ot">=</span> .x <span class="sc">%&gt;%</span> dplyr<span class="sc">::</span><span class="fu">pull</span>(items) <span class="sc">%&gt;%</span> <span class="fu">paste</span>(<span class="at">collapse =</span> <span class="st">";"</span>)</span>
+<span id="cb5-6"><a href="#cb5-6" aria-hidden="true" tabindex="-1"></a>   data <span class="ot">&lt;-</span> <span class="fu">data.frame</span>(<span class="at">id =</span> id, <span class="at">items =</span> items)</span>
+<span id="cb5-7"><a href="#cb5-7" aria-hidden="true" tabindex="-1"></a>   <span class="fu">return</span>(data)</span>
+<span id="cb5-8"><a href="#cb5-8" aria-hidden="true" tabindex="-1"></a>  }) <span class="sc">%&gt;%</span> <span class="fu">do.call</span>(rbind, .)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</details>
+<div class="cell-output cell-output-stdout">
+<pre><code>  id items
+1  1 A;B;C
+2  2 D;E;F
+3  3 G;H;K</code></pre>
 </div>
 </div>
 </section>
